@@ -1,77 +1,13 @@
-# need to detach dplyr, since Hmisc summarize function masks it if weights package is loaded after dplyr
-# after detaching dplyr, reload tidyverse or dplyr so that instead dplyr's summarize masks Hmisc
-
-# although detaching dplyr may not be possible when dplyr is opened with another package...
-
-# detach_package <- function(pkg, character.only = FALSE) {
-#                 
-#         if(!character.only) {
-#                         pkg <- deparse(substitute(pkg))
-#         }
-#                 
-#         search_item <- paste("package", pkg, sep = ":")
-#         while(search_item %in% search()) {
-#                         detach(search_item, unload = TRUE, character.only = TRUE)
-#         }
-# }
-
-detach("package:dplyr", unload=TRUE)
-
-
-#########################################################################
-#########################################################################
-#########################################################################
-
-
 library(Hmisc)
 library(dplyr)
 library(tidyverse)
-library(gapminder)
 library(testthat)
 library(attempt)
 library(rlang)
 
-setwd("C:/Users/Stephen/Desktop/R/tabler")
+# note that because loading dplyr before Hmisc will cause Hmisc's summarize() to mask dplyr's summarize()
+# all calls to summarize() are specified as dplyr::summarize()
 
-# https://www.rdocumentation.org/packages/Hmisc/versions/4.1-1/topics/wtd.stats
-# https://dplyr.tidyverse.org/articles/programming.html
-# http://rstudio-pubs-static.s3.amazonaws.com/6975_c4943349b6174f448104a5513fed59a9.html
-# http://pcwww.liv.ac.uk/~william/R/crosstab.r
-# https://www.rdocumentation.org/packages/descr/versions/1.1.4/topics/CrossTable
-# https://dabblingwithdata.wordpress.com/2017/12/20/my-favourite-r-package-for-frequency-tables/
-# https://juba.github.io/questionr/reference/index.html has cross.multi.table()
-
-# create data
-# age <- c(10, 20, 30, 10, 20, 30, 30, 30, 30, 20)
-# sleep <- c(8, 8, 8, 6, 5, 5, 9, 6, 5, 8)
-# country <- c("England", "U.S.", "Germany", "England", "U.S.", "Germany", "U.S.", "U.S.", "U.S.", "England")
-# health <- c("high", "medium", "low", "low", "low", "medium", "high", "high", "low", "medium")
-# sex <- c("male", "male", "female", "female", "male", "male", "male", "male", "female", "female")
-# weights <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
-# data <- tibble(age, sleep, country, health, sex, weights)
-# data
-
-# also maybe look at gss_cat data in forcats
-
-data_original <- gapminder %>% mutate(life_exp = case_when(lifeExp < 30 ~ "short", 
-                                                           lifeExp >= 30 & lifeExp < 50 ~ "average", 
-                                                           lifeExp >= 50 ~ "long"),
-                                      size = case_when(pop < 5000000 ~ "small", 
-                                                       pop >= 5000000 & pop < 100000000 ~ "medium",
-                                                       pop >= 100000000 ~ "large"),
-                                      era = case_when(year < 1950 ~ "early", 
-                                                      year >= 1950 & year < 1980 ~ "recent",
-                                                      year >= 1980 ~ "modern"),
-                                      country = as.character(country),
-                                      continent = as.character(continent)) %>% 
-        filter(country != "Cote d'Ivoire") %>%
-        mutate(row_number = row_number(), 
-               continent = case_when(row_number == 1 ~ NA_character_, TRUE ~ continent),
-               size = case_when(row_number == 2 ~ NA_character_, TRUE ~ size))
-data_original
-
-
-#################################################################################################3
 
 
 # create tabler function
@@ -89,18 +25,54 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         
         # will pass row to deparse(substitute()) to see if it's a single bare variable
         # if so, will overwrite row with the deparsed string
+        # note this handler won't allow passing multiple bare variables in c()
+        # if you want multiple bar variables, pass into vars
         if(deparse(substitute(rows)) %in% names(data)) {
+                
                 rows <- deparse(substitute(rows))
-        }
+        } 
         
-        # handle row if it's from quo(), quos(), or vars()
+        # handle row if it's passed using quo(), quos(), or vars(), including tidyselect helpers
+        # would be nice to issue custom error when tidyselectors have ONLY invalid vars
+        # default is to give uninformative error message "Error in -x : invalid argument to unary operator"
+        # can use attempt's try_catch, with custom if()/str_replace function to micro-handle different errors
         if("quosure" %in% class(rows) | "quosures" %in% class(rows)) {
                 
-                rows <- map(.x = rows, .f = as_name) %>% unlist()
+                # handle bare variables passed to vars() that are not found in data
+                try_catch(expr = rows_placeholder <- data %>% select(!!!rows) %>% names(), .e = function(e) {
+                        
+                        if(str_detect(string = as.character(e), 
+                                      pattern = regex("object .* not found\n"))) {
+                                
+                                var_not_found <- str_extract(string = as.character(e), 
+                                                             pattern = regex('object .* not found\n$')) %>% 
+                                        str_replace(string = ., pattern = "object ", replacement = "") %>% 
+                                        str_replace(string = ., pattern = " not found\n$", 
+                                                    replacement = "")
+                                
+                                stop(str_glue("The following variable passed to the rows ",
+                                              "argument is not found in the data: ",
+                                              "{var_not_found}"))
+                        } 
+                })
+                
+                # handle cases where all tidyselect helpers are not found in data
+                # when this is the case, rows is set as character(0)
+                # this leads downstream to an "Error in -x : invalid argument to unary operator"
+                # but easier to catch it here
+                if(length(data %>% select(!!!rows) %>% names()) == 0) {
+                        stop(str_glue("The following tidyselect helpers ",
+                                      "passed to the rows argument do not match to any variables found in the data: ",
+                                      "{str_c((map(.x = rows, .f = as_label) %>% unlist()), collapse = ', ')}"))
+                }
+                
+                # if no errors have been raised, overwrite rows with rows_placeholder
+                rows <- rows_placeholder
         }
         
-        # if row is not a single bare variable or a quosure, it should be a character
-        # the argument tests below will ensure that all variables in row match names in the data
+        # if rows is not a valid single bare variable or a quosure, it is a non-valid bare variable
+        # or a character, or something and the argument tests below will ensure 
+        # that all variables in rows match names in the data, or will throw error
         
         
         #################
@@ -111,18 +83,50 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         
         # will pass col to deparse(substitute()) to see if it's a single bare variable
         # if so, will overwrite col with the deparsed string
+        # note this handler won't allow passing multiple bare variables in c()
+        # if you want multiple bar variables, pass into vars
         if(deparse(substitute(cols)) %in% names(data)) {
                 cols <- deparse(substitute(cols))
         }
         
-        # handle col if it's from quo(), quos(), or vars()
+        # handle col if it's passed from quo(), quos(), or vars()
         if("quosure" %in% class(cols) | "quosures" %in% class(cols)) {
                 
-                cols <- map(.x = cols, .f = as_name) %>% unlist()
+                # handle bare variables passed to vars() that are not found in data
+                try_catch(expr = cols_placeholder <- data %>% select(!!!cols) %>% names(), .e = function(e) {
+                        
+                        if(str_detect(string = as.character(e), 
+                                      pattern = regex("object .* not found\n"))) {
+                                
+                                var_not_found <- str_extract(string = as.character(e), 
+                                                             pattern = regex('object .* not found\n$')) %>% 
+                                        str_replace(string = ., pattern = "object ", replacement = "") %>% 
+                                        str_replace(string = ., pattern = " not found\n$", 
+                                                    replacement = "")
+                                
+                                stop(str_glue("The following variable passed to the cols ",
+                                              "argument is not found in the data: ",
+                                              "{var_not_found}"))
+                        } 
+                })
+                
+                # handle cases where all tidyselect helpers are not found in data
+                # when this is the case, cols is set as character(0)
+                # this leads downstream to an "Error in -x : invalid argument to unary operator"
+                # but easier to catch it here
+                if(length(data %>% select(!!!cols) %>% names()) == 0) {
+                        stop(str_glue("The following tidyselect helpers ",
+                                      "passed to the cols argument do not match to any variables found in the data: ",
+                                      "{str_c((map(.x = cols, .f = as_label) %>% unlist()), collapse = ', ')}"))
+                }
+                
+                # if no errors have been raised, overwrite cols with cols_placeholder
+                cols <- cols_placeholder
         }
         
-        # if col is not a single bare variable or a quosure, it should be a character
-        # the argument tests below will ensure that all variables in col match names in the data
+        # if cols is not a valid single bare variable or a quosure, it is a non-valid bare variable
+        # or a character, and the argument tests below will ensure 
+        # that all variables in cols match names in the data, or will throw error
         
         
         ############################################################################################
@@ -160,7 +164,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         }
         
         if((tibble(row_vars = rows) %>% mutate(row_in_data = row_vars %in% names(data)) %>% 
-           filter(row_in_data == FALSE) %>% nrow()) > 0) {
+            filter(row_in_data == FALSE) %>% nrow()) > 0) {
                 row_vars_not_in_data <- tibble(row_vars = rows) %>% 
                         mutate(row_in_data = row_vars %in% names(data)) %>% 
                         filter(row_in_data == FALSE) %>% pull(row_vars) %>%
@@ -181,11 +185,37 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                 }  
         }
         
+        if(!is.null(stat_vars)) {
+                if((tibble(stat_vars_arg = stat_vars) %>% 
+                    mutate(stat_vars_in_data = stat_vars_arg %in% names(data)) %>% 
+                    filter(stat_vars_in_data == FALSE) %>% nrow()) > 0) {
+                        stat_vars_not_in_data <- tibble(stat_vars_arg = stat_vars) %>% 
+                                mutate(stat_vars_in_data = stat_vars_arg %in% names(data)) %>% 
+                                filter(stat_vars_in_data == FALSE) %>% pull(stat_vars_arg) %>%
+                                str_c(string = ., collapse = ", ")
+                        stop(str_c("The following variables passed to the stat_ars argument ", 
+                                   "are not found in the data: ", stat_vars_not_in_data))
+                }  
+        }
+        
         if(sum(stats %in% c("n", "pct", "valid_pct", "n_distinct", "mean", "median", "mode", "sd", "min", "max", 
-                           "quantiles")) != length(stats)) {
+                            "quantiles")) != length(stats)) {
                 stop("The stats argument can only include one or more of the following: 
                      n', 'pct', 'valid_pct', 'n_distinct', 'mean', 'median', 'mode', 'sd', 'min', 'max', 
                      'quantiles'.  Default is c('n', 'pct').")
+        }
+        
+        if((sum(stats %in% c("n_distinct", "mean", "median", "mode", "sd", "min", "max", 
+                             "quantiles")) > 0) & (is.null(stat_vars))) {
+                
+                stats_requiring_stat_var <- tibble(stats_arg = stats) %>% 
+                        filter(stats_arg %in% c("n_distinct", "mean", "median", "mode", "sd", "min", "max", 
+                                                "quantiles")) %>%
+                        pull(stats_arg) %>% str_c(string = ., collapse = ", ")
+                
+                stop(str_glue("The stats argument included {stats_requiring_stat_var}, ",
+                              "so the stat_vars argument must specify at least one variable ",
+                              "and cannot be NULL."))
         }
         
         if(!pct_type %in% c("all", "row", "col")) {
@@ -320,7 +350,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         row_index_tbl <- data %>% group_by(!!!rows_syms) %>% count() %>% select(-n) %>% ungroup() %>% 
                 arrange(!!!rows_syms)
         
-  
+        
         ################################################################################################
         
         
@@ -370,10 +400,10 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                 # get output_col_vars (this format is needed to bind_rows with data later on)
                 output_col_vars <- map_dfc(.x = cols, 
                                            .f = ~create_output_vars(.x, 
-                                                        n_output_table_initial = n_output_table_initial)) %>% 
+                                                                    n_output_table_initial = n_output_table_initial)) %>% 
                         rename_at(.vars = vars(contains("output_var")), 
-                                .funs = ~ str_replace(string = ., pattern = "output_var", replacement = "output_col"))
-
+                                  .funs = ~ str_replace(string = ., pattern = "output_var", replacement = "output_col"))
+                
                 # get final_output_col_vars, which collapses the output_col to how they'll look in final output
                 final_output_col_vars <- output_col_vars %>% 
                         unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
@@ -419,10 +449,10 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         if(cols_present == TRUE) {
                 # create col_var_tbl
                 col_var_tbl <- map_dfc(.x = cols, .f = ~create_output_vars(.x,
-                                                n_output_table_initial = n_output_table_initial)) %>% distinct() %>%
+                                                                           n_output_table_initial = n_output_table_initial)) %>% distinct() %>%
                         rename_at(.vars = vars(contains("output_var")), 
-                                .funs = ~ str_replace(string = ., pattern = "output_var", 
-                                                      replacement = "output_col")) %>%
+                                  .funs = ~ str_replace(string = ., pattern = "output_var", 
+                                                        replacement = "output_col")) %>%
                         bind_cols(row_index_key_tbl %>% select(!!!cols_syms) %>% distinct(), .) %>%
                         unite(col = col_vars, starts_with("output_col"), sep = "_x_", remove = FALSE) %>% 
                         select(col_vars, everything()) %>% select(2:ncol(.), 1)
@@ -433,9 +463,9 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         
         ###################
         
-
+        
         # create row_var_tbl
-
+        
         # get output_row_vars 
         output_row_vars <- map_dfc(.x = rows, 
                                    .f = ~create_output_vars(.x, n_output_table_initial = n_output_table_initial)) %>%
@@ -471,8 +501,8 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                 
                 # get sum_n across all columns
                 sum_n <- n_output_table %>% select(-c(!!!rows_syms)) %>% 
-                        map(.x = ., .f = ~ sum(.x, na.rm = TRUE)) %>% enframe() %>% unnest() %>%
-                        summarize(sum_n = sum(value, na.rm = TRUE)) %>% pull(sum_n)
+                        map(.x = ., .f = ~ sum(.x, na.rm = TRUE)) %>% enframe() %>% unnest(cols = "value") %>%
+                        dplyr::summarize(sum_n = sum(value, na.rm = TRUE)) %>% pull(sum_n)
                 
                 # get percentages across all columns
                 pct_output_table <- n_output_table %>% select(-c(!!!rows_syms)) %>% 
@@ -677,7 +707,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                 # call get_na_output_col_vars
                 na_output_col_vars <- map(.x = cols,
                                           .f = ~ get_na_output_col_vars(.x, current_stat = "n")) %>%
-                        enframe() %>% unnest() %>% select(row_number)
+                        enframe() %>% unnest(cols = value) %>% select(row_number)
                 
                 # get na_output_col_vars which has final na_output variable name after combining with other groups
                 na_output_col_vars <- output_col_vars %>% mutate(row_number = row_number()) %>%
@@ -686,9 +716,16 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
                         mutate(col_vars = str_c(col_vars, "__n")) %>% pull(col_vars)
                 
-                # get valid_pct_output_table_col by dropping na col in na_output_table
-                valid_pct_output_col_vars <- n_output_table %>%
-                        select(-c(!!!syms(na_output_col_vars))) %>% names()
+                # if there are no na_output_col_vars, then just return original n_output_table names
+                if(length(na_output_col_vars) == 0) {
+                        valid_pct_output_col_vars <- n_output_table %>% names()
+                }
+                
+                # if there are na output_col_vars, get valid_pct_output_table_col by dropping na col
+                if(length(na_output_col_vars) != 0) {
+                        valid_pct_output_col_vars <- n_output_table %>%
+                                select(-c(!!!syms(na_output_col_vars))) %>% names()
+                }
         }
         
         
@@ -709,8 +746,9 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         # get sum_n across all columns
                         sum_n <- n_output_table_for_valid_pct %>%
                                 select(-c(!!!rows_syms)) %>%
-                                map(.x = ., .f = ~ sum(.x, na.rm = TRUE)) %>% enframe() %>% unnest() %>%
-                                summarize(sum_n = sum(value, na.rm = TRUE)) %>% pull(sum_n)
+                                map(.x = ., .f = ~ sum(.x, na.rm = TRUE)) %>% enframe() %>% 
+                                unnest(cols = value) %>%
+                                dplyr::summarize(sum_n = sum(value, na.rm = TRUE)) %>% pull(sum_n)
                         
                         # get percentages across all columns
                         valid_pct_output_table <- n_output_table_for_valid_pct %>% select(-c(!!!rows_syms)) %>%
@@ -873,8 +911,8 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         
                         # get mean_output_table
                         mean_output_table <- data %>% group_by(!!!rows_syms) %>% 
-                                summarize(mean = wtd.mean(!!current_stat_var_sym, weights = weights, 
-                                                          normwt = normalize_weights, na.rm = TRUE)) %>% 
+                                dplyr::summarize(mean = wtd.mean(!!current_stat_var_sym, weights = weights, 
+                                                                 normwt = normalize_weights, na.rm = TRUE)) %>% 
                                 ungroup() %>%  select(-c(!!!rows_syms))
                         
                         
@@ -896,8 +934,8 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         # get mean_output_table
                         mean_output_table <- data %>% 
                                 group_by(!!!rows_syms, !!!cols_syms) %>% 
-                                summarize(mean = wtd.mean(!!current_stat_var_sym, weights = weights, 
-                                                          normwt = normalize_weights, na.rm = TRUE)) %>% 
+                                dplyr::summarize(mean = wtd.mean(!!current_stat_var_sym, weights = weights, 
+                                                                 normwt = normalize_weights, na.rm = TRUE)) %>% 
                                 ungroup() %>%
                                 unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
                                 left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
@@ -938,10 +976,10 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         
                         # get median_output_table
                         median_output_table <- data %>% group_by(!!!rows_syms) %>% 
-                                summarize(median = list(enframe(wtd.quantile(!!current_stat_var_sym, 
-                                                                             probs = .5, weights = weights, 
-                                                                             normwt = normalize_weights, na.rm = TRUE)))) %>% 
-                                unnest() %>% ungroup() %>% 
+                                dplyr::summarize(median = list(enframe(wtd.quantile(!!current_stat_var_sym, 
+                                                                                    probs = .5, weights = weights, 
+                                                                                    normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                unnest(cols = median) %>% ungroup() %>% 
                                 mutate(name = str_c("median", ".", current_stat_var)) %>%
                                 spread(key = name, value = value) %>%
                                 select(-c(!!!rows_syms)) 
@@ -955,10 +993,10 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         
                         # get median_output_table
                         median_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms) %>% 
-                                summarize(median = list(enframe(wtd.quantile(!!current_stat_var_sym, 
-                                                                             probs = .5, weights = weights, 
-                                                                             normwt = normalize_weights, na.rm = TRUE)))) %>% 
-                                unnest() %>% ungroup() %>% 
+                                dplyr::summarize(median = list(enframe(wtd.quantile(!!current_stat_var_sym, 
+                                                                                    probs = .5, weights = weights, 
+                                                                                    normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                unnest(cols = median) %>% ungroup() %>% 
                                 mutate(name = "median") %>%
                                 spread(key = name, value = value) %>% 
                                 unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
@@ -991,7 +1029,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                 
                 # get current_stat_var
                 current_stat_var <- .x
-
+                
                 # get current_stat_var_sym 
                 current_stat_var_sym <- ensym(current_stat_var)
                 
@@ -1009,7 +1047,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                                         arrange(desc(n), !!current_stat_var_sym) %>% 
                                         slice(1) %>%
                                         ungroup() %>% select(-n) %>% 
-                                        rename(mode = current_stat_var) %>%
+                                        rename(mode := !!current_stat_var) %>%
                                         select(-c(!!!rows_syms))
                         }
                         
@@ -1026,12 +1064,12 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                                         # need to sum to account for different weight values
                                         # leading to multiple row per row/stat_var combos
                                         group_by(!!!rows_syms, !!current_stat_var_sym) %>%
-                                        summarize(n = sum(n, na.rm = TRUE)) %>% ungroup() %>%
+                                        dplyr::summarize(n = sum(n, na.rm = TRUE)) %>% ungroup() %>%
                                         group_by(!!!rows_syms) %>%
                                         arrange(desc(n), !!current_stat_var_sym) %>% 
                                         slice(1) %>%
                                         ungroup() %>% select(-n) %>% 
-                                        rename(mode = current_stat_var) %>%
+                                        rename(mode := !!current_stat_var) %>%
                                         select(-c(!!!rows_syms))
                         }
                         
@@ -1067,10 +1105,10 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                                         arrange(row_index_tbl_row_number) %>% 
                                         select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
                                         unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
-                                        rename(mode = current_stat_var) %>%
+                                        rename(mode := !!current_stat_var_sym) %>%
                                         mutate(col_vars = str_c(col_vars, "__mode", ".", current_stat_var)) %>%
-                                        spread(key = col_vars, value = mode) %>% 
-                                        select(-c(!!!rows_syms))
+                                        select(-n) %>%
+                                        spread(key = col_vars, value = mode) 
                         }
                         
                         # get mode_output_table, if normalize_weights = FALSE
@@ -1086,7 +1124,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                                         # need to sum to account for different weight values
                                         # leading to multiple row per row/stat_var combos
                                         group_by(!!!rows_syms, !!!cols_syms, !!current_stat_var_sym) %>%
-                                        summarize(n = sum(n, na.rm = TRUE)) %>% ungroup() %>%
+                                        dplyr::summarize(n = sum(n, na.rm = TRUE)) %>% ungroup() %>%
                                         group_by(!!!rows_syms, !!!cols_syms) %>%
                                         arrange(desc(n), !!current_stat_var_sym) %>% slice(1) %>%
                                         ungroup() %>% select(-n) %>%
@@ -1096,7 +1134,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                                         arrange(row_index_tbl_row_number) %>%
                                         select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
                                         unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
-                                        rename(mode = current_stat_var) %>%
+                                        rename(mode := !!current_stat_var_sym) %>%
                                         mutate(col_vars = str_c(col_vars, "__mode", ".", current_stat_var)) %>%
                                         spread(key = col_vars, value = mode)
                         }
@@ -1131,9 +1169,9 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         
                         # get sd_output_table
                         sd_output_table <- data %>% group_by(!!!rows_syms) %>% 
-                                summarize(sd = suppressWarnings(sqrt(wtd.var(!!current_stat_var_sym, 
-                                                                             weights = weights, 
-                                                                             normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                dplyr::summarize(sd = suppressWarnings(sqrt(wtd.var(!!current_stat_var_sym, 
+                                                                                    weights = weights, 
+                                                                                    normwt = normalize_weights, na.rm = TRUE)))) %>% 
                                 ungroup() %>%  select(-c(!!!rows_syms))
                         
                         
@@ -1155,9 +1193,9 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         # get sd_output_table
                         sd_output_table <- data %>% 
                                 group_by(!!!rows_syms, !!!cols_syms) %>% 
-                                summarize(sd = suppressWarnings(sqrt(wtd.var(!!current_stat_var_sym, 
-                                                                             weights = weights, 
-                                                                             normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                dplyr::summarize(sd = suppressWarnings(sqrt(wtd.var(!!current_stat_var_sym, 
+                                                                                    weights = weights, 
+                                                                                    normwt = normalize_weights, na.rm = TRUE)))) %>% 
                                 ungroup() %>%
                                 unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
                                 left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
@@ -1198,7 +1236,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         
                         # get min_output_table
                         min_output_table <- data %>% group_by(!!!rows_syms) %>% 
-                                summarize(min = min(!!current_stat_var_sym, na.rm = TRUE)) %>% 
+                                dplyr::summarize(min = min(!!current_stat_var_sym, na.rm = TRUE)) %>% 
                                 ungroup() %>%  select(-c(!!!rows_syms))
                         
                         # get current_stat_variable_name
@@ -1219,7 +1257,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         # get min_output_table
                         min_output_table <- data %>% 
                                 group_by(!!!rows_syms, !!!cols_syms) %>% 
-                                summarize(min = min(!!current_stat_var_sym, na.rm = TRUE)) %>% 
+                                dplyr::summarize(min = min(!!current_stat_var_sym, na.rm = TRUE)) %>% 
                                 ungroup() %>%
                                 unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
                                 left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
@@ -1260,7 +1298,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         
                         # get max_output_table
                         max_output_table <- data %>% group_by(!!!rows_syms) %>% 
-                                summarize(max = max(!!current_stat_var_sym, na.rm = TRUE)) %>% 
+                                dplyr::summarize(max = max(!!current_stat_var_sym, na.rm = TRUE)) %>% 
                                 ungroup() %>%  select(-c(!!!rows_syms))
                         
                         # get current_stat_variable_name
@@ -1281,7 +1319,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         # get max_output_table
                         max_output_table <- data %>% 
                                 group_by(!!!rows_syms, !!!cols_syms) %>% 
-                                summarize(max = max(!!current_stat_var_sym, na.rm = TRUE)) %>% 
+                                dplyr::summarize(max = max(!!current_stat_var_sym, na.rm = TRUE)) %>% 
                                 ungroup() %>%
                                 unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
                                 left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
@@ -1325,13 +1363,10 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         
                         # get quantiles_output_table
                         quantiles_output_table <- data %>% group_by(!!!rows_syms) %>% 
-                                summarize(quantiles = list(enframe(wtd.quantile(!!current_stat_var_sym, 
-                                                                                probs = quantiles, weights = weights, 
-                                                                                normwt = normalize_weights, na.rm = TRUE)))) %>% 
-                                unnest() %>% ungroup() %>% 
-                                # mutate(name = str_c("q", str_squish(name)),
-                                #        name = str_replace(string = name, pattern = "%", replacement = ""),
-                                #        name = str_c(name, ".", current_stat_var)) %>%
+                                dplyr::summarize(quantiles = list(enframe(wtd.quantile(!!current_stat_var_sym, 
+                                                                                       probs = quantiles, weights = weights, 
+                                                                                       normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                unnest(cols = quantiles) %>% ungroup() %>% 
                                 mutate(name = str_squish(name),
                                        name = str_replace(string = name, pattern = "%", replacement = ""),
                                        name = round(as.numeric(name), digits = 0),
@@ -1348,7 +1383,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         # rename current_stat_variable_name
                         quantiles_output_table <- quantiles_output_table %>%
                                 rename_at(.vars = vars(everything()), 
-                                          .funs = funs(str_c(., ".", current_stat_var))) 
+                                          .funs = ~ str_c(., ".", current_stat_var)) 
                         
                         return(quantiles_output_table)
                 }
@@ -1374,7 +1409,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                                 # loop through and join current_collapsed_output_col_var with quantiles_order 
                                 current_quantiles_ordered_var <- map(.x = quantiles_order, 
                                                                      .f = ~ str_c(current_collapsed_output_col_var, "__", .x)) %>%
-                                        enframe() %>% unnest() %>% select(value)
+                                        enframe() %>% unnest(cols = value) %>% select(value)
                                 
                                 return(current_quantiles_ordered_var)
                         }
@@ -1389,10 +1424,10 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         
                         # get quantiles_output_table
                         quantiles_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms) %>% 
-                                summarize(quantiles = list(enframe(wtd.quantile(!!current_stat_var_sym, 
-                                                                                probs = quantiles, weights = weights, 
-                                                                                normwt = normalize_weights, na.rm = TRUE)))) %>% 
-                                unnest() %>% ungroup() %>% 
+                                dplyr::summarize(quantiles = list(enframe(wtd.quantile(!!current_stat_var_sym, 
+                                                                                       probs = quantiles, weights = weights, 
+                                                                                       normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                unnest(cols = quantiles) %>% ungroup() %>% 
                                 mutate(name = str_squish(name),
                                        name = str_replace(string = name, pattern = "%", replacement = ""),
                                        name = round(as.numeric(name), digits = 0),
@@ -1437,7 +1472,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         
                         # get current_stat
                         current_stat <- .x
-
+                        
                         if(current_stat == "n") {
                                 return(n_output_table %>% select(-c(!!!rows_syms)))
                         }
@@ -1500,10 +1535,10 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         
                         # get current_output_col_var
                         current_output_col_var <- .x
-
+                        
                         # call loop_through_stat function
                         col_var_output <- map_dfc(.x = stats, 
-                                .f = ~ loop_through_stat(current_output_col_var = current_output_col_var, .x))
+                                                  .f = ~ loop_through_stat(current_output_col_var = current_output_col_var, .x))
                         return(col_var_output)
                 }
                 
@@ -1634,22 +1669,32 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         
         # add attributes to facilitate tabler helper functions
         
-        # add rows and cols as attributes
-        attr(x = output_table, which = "tabler_rows") <- rows
-        attr(x = output_table, which = "tabler_cols") <- cols
+        # # add rows and cols as attributes
+        # attr(x = output_table, which = "tabler_rows") <- rows
+        # attr(x = output_table, which = "tabler_cols") <- cols
+        # 
+        # # add stats as attributes
+        # attr(x = output_table, which = "tabler_stats") <- stats
+        # 
+        # # add stat_vars as attributes
+        # attr(x = output_table, which = "tabler_stat_vars") <- stat_vars
         
-        # add stats as attributes
-        attr(x = output_table, which = "tabler_stats") <- stats
         
-        # add stat_vars as attributes
-        attr(x = output_table, which = "tabler_stat_vars") <- stat_vars
+        # update col_var_tbl and add as attribute
         
-        # add row_var_tbl and col_var_tbl as attributes 
-        # this enables tabler_pivot_longer() and tabler_uncollapse/collapse_row_names()
-        attr(x = output_table, which = "tabler_row_var_tbl") <- row_var_tbl
+        # add stat_vars to col_var_tbl, since all of the stat_vars must be used at least once (unless dropped via specify_stat_combos)
+        col_var_tbl2 <- map_dfr(.x = stat_vars, .f = ~ col_var_tbl %>% mutate(stat_vars = .x)) 
+        mean_col_var_tbl <- tibble(col_vars = mean_output_table %>% select(-c(!!!syms(rows))) %>% names()) %>% 
+                mutate(stat = "mean", stat_vars = str_extract(string = col_vars, pattern = regex("__.*\\.*$")),
+                       stat_vars = str_replace(string = stat_vars, pattern = regex("__.*\\."), replacement = ""))
+        # col_var_tbl2 %>% 
+                
         attr(x = output_table, which = "tabler_col_var_tbl") <- col_var_tbl
         
-        
+        # add row_var_tbl as attribute
+        attr(x = output_table, which = "tabler_row_var_tbl") <- row_var_tbl
+
+
         #################################################################################################
         #################################################################################################
         
@@ -1657,89 +1702,4 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         # return output table
         return(output_table)
 }
-
-
-
-#############################################################################################
-
-
-# test tabler
-# rows <- c("continent", "era")
-rows <- vars(continent, era)
-# rows <- "continent"
-# cols <- NULL
-# cols <- c("size", "life_exp")
-cols <- vars(size, life_exp)
-# weights <- "weights"
-weights <- NULL
-# stats <- c("n", "pct", "valid_pct", "n_distinct", "mean", "median", "mode", "sd", "min", "max", "quantiles")
-# stats <- c("n", "pct", "valid_pct")
-stats <- NULL
-# stat_vars <- NULL
-stat_vars <- c("pop", "country")
-# stat_vars <- c("country", "year")
-pct_type <- "row"
-n_quantiles <- NULL
-# quantiles <- c(0, .25, .5, .75, 1)
-quantiles <- c(.25, .5, .75, 1)
-normalize_weights <- FALSE
-
-data <- data_original
-# data <- data %>% mutate(weights = sample(x = seq(from = 1, to = 3, by = .1), size = nrow(data), replace = TRUE))
-glimpse(data)
-
-tabler_output <- data %>% tabler(rows = rows, cols = cols, weights = weights, stats = stats, stat_vars = stat_vars, 
-                                 pct_type = pct_type, 
-                                 n_quantiles = n_quantiles, quantiles = quantiles, 
-                                 normalize_weights = normalize_weights) 
-tabler_output %>% glimpse()
-tabler_output %>% attributes()
-# write_csv(tabler_output, path = "tabler_output.csv")
-
-data %>% tabler(row = "continent", weights = weights, stat = stat, stat_vars = stat_vars, 
-                pct_type = pct_type, 
-                n_quantiles = n_quantiles, quantiles = quantiles, 
-                normalize_weights = normalize_weights)
-
-
-###########################################################################
-
-
-# next steps
-
-
-
-##############
-
-
-# prioritized feature list
-
-# consider add row_number to tbls when doing spread(), since if there are otherwise duplicate records it has issues??
-# complete tabler_tests
-# add specify_stat_combos argument 
-
-# allow stacking multiple row/col groups crossed against each other
-
-# tabler_create_dummies standalone function (convert w/ format var.value)
-# tabler_drop_neg_dummies standalone function (use stored attributes, can drop all, or can also specify vars)
-# tabler_comma_format() standalone function w/ round option
-# tabler_pct_format() standalone function that specifically targets pct vars
-# tabler_round_format() standalone function
-# tabler_custom_format standalone function that can apply comma/pct/round format to specific cols
-# tabler_stat_total_row/col standalone functions (can total any stat)
-# for multiple row/col groups, totals can recognize row/col groups by attribute tbls
-# the total row/cols can then be added as "totals_row/col_group_1" etc and inserted after row/col
-# or if the argument is passed for across_groups = TRUE, a single "totals_row/col_all_groups" can be added
-# tabler_col_reorder standalone function to order stat_cols based on col_vars, stats, or stat_vars
-# tabler_simplify_col/row_names, drops preceding var., and returns just value__stat.stat_var 
-# (only valid for use on row if row var_names are collapsed and tabler_row is present)
-# tabler_collapse_row_names standalone function
-# tabler_uncollapse_row_names standalone function
-# tabler_pivot_longer which uncollapses col names to long data w var, value, stat, and stat_var cols (use attributes)
-
-# add tabler_to_flextable function that creates spanning headers based on grouped column names
-# nesting order can just be default order in tabler output, or user can specify alternate
-
-# allow for custom functions to be added to stat argument?? maybe not wise
-
 
