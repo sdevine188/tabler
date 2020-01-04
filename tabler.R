@@ -11,10 +11,23 @@ library(rlang)
 
 
 # create tabler function
-tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL, 
-                   pct_type = "all", 
-                   n_quantiles = NULL, quantiles = c(0, .25, .5, .75, 1), 
+tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_vars = NULL, 
+                   quantile = c(0, .25, .5, .75, 1), 
                    weights = NULL, normalize_weights = TRUE) {
+        
+        
+        #######################
+        
+        
+        # check to ensure mandatory data argument is not null
+        if(is.null(data)) {
+                stop("The data argument is required, but not input was given.")
+        }
+
+        # check to ensure mandatory rows argument is not null
+        if(is.null(deparse(substitute(rows)))) {
+                stop("The rows argument is required, but not input was given.")
+        }
         
         
         ######################
@@ -129,6 +142,60 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         # that all variables in cols match names in the data, or will throw error
         
         
+        ######################
+        
+        
+        # handle stat_vars argument to determine if it's a single bare variable, or 
+        # quosures, or character
+        
+        # will pass stat_vars to deparse(substitute()) to see if it's a single bare variable
+        # if so, will overwrite stat_vars with the deparsed string
+        # note this handler won't allow passing multiple bare variables in c()
+        # if you want multiple bar variables, pass into vars
+        if(deparse(substitute(stat_vars)) %in% names(data)) {
+                
+                stat_vars <- deparse(substitute(stat_vars))
+        } 
+        
+        # handle row if it's passed using quo(), quos(), or vars(), including tidyselect helpers
+        # would be nice to issue custom error when tidyselectors have ONLY invalid vars
+        # default is to give uninformative error message "Error in -x : invalid argument to unary operator"
+        # can use attempt's try_catch, with custom if()/str_replace function to micro-handle different errors
+        if("quosure" %in% class(stat_vars) | "quosures" %in% class(stat_vars)) {
+                
+                # handle bare variables passed to vars() that are not found in data
+                try_catch(expr = stat_vars_placeholder <- data %>% select(!!!stat_vars) %>% names(), 
+                          .e = function(e) {
+                        
+                        if(str_detect(string = as.character(e), 
+                                      pattern = regex("object .* not found\n"))) {
+                                
+                                var_not_found <- str_extract(string = as.character(e), 
+                                                             pattern = regex('object .* not found\n$')) %>% 
+                                        str_replace(string = ., pattern = "object ", replacement = "") %>% 
+                                        str_replace(string = ., pattern = " not found\n$", 
+                                                    replacement = "")
+                                
+                                stop(str_glue("The following variable passed to the stat_vars ",
+                                              "argument is not found in the data: ",
+                                              "{var_not_found}"))
+                        } 
+                })
+                
+                # handle cases where all tidyselect helpers are not found in data
+                # when this is the case, stat_vars is set as character(0)
+                # this leads downstream to an "Error in -x : invalid argument to unary operator"
+                # but easier to catch it here
+                if(length(data %>% select(!!!stat_vars) %>% names()) == 0) {
+                        stop(str_glue("The following tidyselect helpers ",
+                                      "passed to the stat_vars argument do not match to any variables found in the data: ",
+                                      "{str_c((map(.x = stat_vars, .f = as_label) %>% unlist()), collapse = ', ')}"))
+                }
+                
+                # if no errors have been raised, overwrite stat_vars with stat_vars_placeholder
+                stat_vars <- stat_vars_placeholder
+        }
+        
         ############################################################################################
         
         
@@ -145,9 +212,10 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                 stats <- "n"
         } 
         
-        # set stat to default c("n", "pct", "valid_pct") if no stat arguments were passed and cols_present = FALSE
+        # set stat to default c("n", "pct_col") 
+        # if no stat arguments passed and cols_present = FALSE
         if(is.null(stats) & cols_present == FALSE) {
-                stats <- c("n", "pct", "valid_pct")
+                stats <- c("n", "pct_col")
         } 
         
         
@@ -155,14 +223,6 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         
         
         # check arguments
-        if(missing(data)) {
-                stop("The data argument is required, but no input was given.")
-        }
-        
-        if(missing(rows)) {
-                stop("The rows argument is required, but no input was given.")
-        }
-        
         if((tibble(row_vars = rows) %>% mutate(row_in_data = row_vars %in% names(data)) %>% 
             filter(row_in_data == FALSE) %>% nrow()) > 0) {
                 row_vars_not_in_data <- tibble(row_vars = rows) %>% 
@@ -198,19 +258,22 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                 }  
         }
         
-        if(sum(stats %in% c("n", "pct", "valid_pct", "n_distinct", "mean", "median", "mode", "sd", "min", "max", 
-                            "quantiles")) != length(stats)) {
+        if(sum(stats %in% c("n", "pct_col", "pct_row", "pct_all", "valid_pct_col", "valid_pct_row",
+                            "valid_pct_all", "n_distinct", "mode", "sum", "mean", "median", "sd", "min", "max", 
+                            "quantile")) != length(stats)) {
                 stop("The stats argument can only include one or more of the following: 
-                     n', 'pct', 'valid_pct', 'n_distinct', 'mean', 'median', 'mode', 'sd', 'min', 'max', 
-                     'quantiles'.  Default is c('n', 'pct').")
+                     n', 'pct_col', 'pct_row', 'pct_all', 'valid_pct_col', 'valid_pct_row',
+                        'valid_pct_all', 'n_distinct', 'mode', 'sum', 'mean', 'median', 'sd', 'min', 'max', 
+                     'quantile'.  When no variables are passed to the cols argument, 
+                        the default is c('n', 'pct_col'), and just 'n' otherwise.")
         }
         
-        if((sum(stats %in% c("n_distinct", "mean", "median", "mode", "sd", "min", "max", 
-                             "quantiles")) > 0) & (is.null(stat_vars))) {
+        if((sum(stats %in% c("n_distinct", "mode", "sum", "mean", "median", "sd", "min", "max", 
+                             "quantile")) > 0) & (is.null(stat_vars))) {
                 
                 stats_requiring_stat_var <- tibble(stats_arg = stats) %>% 
-                        filter(stats_arg %in% c("n_distinct", "mean", "median", "mode", "sd", "min", "max", 
-                                                "quantiles")) %>%
+                        filter(stats_arg %in% c("n_distinct", "mode", "sum", "mean", "median", "sd", "min", "max", 
+                                                "quantile")) %>%
                         pull(stats_arg) %>% str_c(string = ., collapse = ", ")
                 
                 stop(str_glue("The stats argument included {stats_requiring_stat_var}, ",
@@ -218,64 +281,25 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                               "and cannot be NULL."))
         }
         
-        if(!pct_type %in% c("all", "row", "col")) {
-                stop("The pct_type argument must be either 'all' (default), 'row', or 'col'.")
-        }
-        
-        if("quantiles" %in% stats & is.null(quantiles)) {
-                stop("The string 'quantiles' was passed to the stat argument, ",
+        if("quantile" %in% stats & is.null(quantile)) {
+                stop("The string 'quantile' was passed to the stat argument, ",
                      "but the quantiles argument was set to NULL. ",
-                     "If 'quantiles' is passed to the stat argument, ",
-                     "then the quantiles argument must be left at the default values of 'c(0, .25, .5, .75, 1)', or",
-                     "the desired quantiles must be passed to the quantiles argument.")
+                     "If 'quantile' is passed to the stat argument, ",
+                     "then the quantile argument must be left at the default values of 'c(0, .25, .5, .75, 1)', or",
+                     "the desired quantiles must be passed to the quantile argument.")
         }
         
-        if(sum(quantiles >= 0 & quantiles <= 1) != length(quantiles)) {
-                stop("The quantiles argument was passed a value that is outside the range 0 to 1, ",
+        if(sum(quantile >= 0 & quantile <= 1) != length(quantile)) {
+                stop("The quantile argument was passed a value that is outside the range 0 to 1, ",
                      "but can only accept numeric values from 0 and 1. ",
                      "The default values are 'c(0, .25, .5, .75, 1).'")
         }
         
-        if(class(quantiles) != c("numeric")) {
-                stop("The quantiles argument was passed a non-numeric value, ",
+        if(class(quantile) != c("numeric")) {
+                stop("The quantile argument was passed a non-numeric value, ",
                      "but can only accept numeric values from 0 and 1. ",
                      "The default values are 'c(0, .25, .5, .75, 1).'")
         }
-        
-        if("quantiles" %in% stats & !is.null(quantiles) & !identical(x = quantiles, y = c(0, .25, .5, .75, 1)) & 
-           !is.null(n_quantiles)) {
-                warning("Since values have been passed to both the quantiles argument and the n_quantiles argument, ",
-                        "the quantiles argument will be ignored, and the ",
-                        "n_quantiles argument will be used to calculate the desired quantiles.")
-                
-                # set value of quantiles using n_quantiles argument
-                quantiles <- (100 / n_quantiles) * c(seq(from = 0, to = n_quantiles, by = 1))
-        }
-        
-        if("quantiles" %in% stats & !is.null(n_quantiles)) {
-                
-                # set value of quantiles using n_quantiles argument
-                quantiles <- (1 / n_quantiles) * c(seq(from = 0, to = n_quantiles, by = 1))
-        }
-        
-        if(class(n_quantiles) %in% c("numeric", "integer")) {
-                stop("The n_quantiles argument was passed a non-numeric and non-integer value, ",
-                     "but can only accept numeric or integer values from 1 to 100.")
-        }
-        
-        if(!is.null(n_quantiles)) {
-                if(n_quantiles > 0 & n_quantiles <= 100) {
-                        stop("The n_quantiles argument was passed a value that is outside the range 1 to 100, ",
-                             "but can only accept numeric values from 1 and 100.")
-                }
-        }
-        
-        # if(sum(add_stat_total_col %in% c("n", "pct", "n_distinct", "mean", "median", "mode", "sd", "min", "max", 
-        #                                  "quantiles")) != length(add_stat_total_col)) {
-        #         stop("The add_stat_total_col argument can only include one or more of the following: 
-        #              n', 'pct', 'valid_pct', 'n_distinct', 'mean', 'median', 'mode', 'sd', 'min', 'max', 
-        #              'quantiles'.  Default is NULL.")
-        # }
         
         if(!normalize_weights %in% c(TRUE, FALSE)) {
                 stop("The normalize_weights argument must be either TRUE or FALSE (default).")
@@ -342,7 +366,6 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         stat_vars_numeric_syms <- syms(stat_vars_numeric)
         
         
-        
         #################################################################################################
         
         
@@ -359,31 +382,40 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         
         # create_output_vars function to get final_output_col_vars when cols_present = TRUE
         # also used to get row/col_var_tbl for attributes
-        create_output_vars <- function(.x, n_output_table_initial) {
-                
-                # get current__var_name
-                current_var_name <- .x
+        create_output_vars <- function(current_var_name, current_var_number, n_output_table_initial) {
                 
                 # get current__var_name_sym
-                current_var_name_sym <- ensym(current_var_name)
+                current_var_name_sym <- sym(current_var_name)
                 
                 # add current_ to n_output_table
                 current_n_output_table <- n_output_table_initial %>% mutate(current_var = current_var_name)
                 
                 # unite current_ and its values
                 current_n_output_table <- current_n_output_table %>% 
-                        unite(col = output_var, current_var, !!current_var_name_sym, sep = ".")
+                        unite(col = output_var, current_var, !!current_var_name_sym, sep = ".", remove = FALSE)
+                
+                # add number to output_var and rename output_var in current_n_output_table
+                current_output_var <- str_c("output_var_", current_var_number)
+                current_n_output_table <- current_n_output_table %>% 
+                        rename(!!sym(current_output_var) := output_var)
                 
                 # select output_
-                output_var <- current_n_output_table %>% select(output_var)
-                return(output_var)
+                current_output_var <- current_n_output_table %>% 
+                        select(!!!rows_syms, !!!cols_syms, current_output_var)
+                return(current_output_var)
         }
         
         # with cols_present = FALSE
         if(cols_present == FALSE) {
                 
-                # get n_output_table
-                n_output_table <- data %>% group_by(!!!rows_syms) %>% count(wt = weights) %>% ungroup() 
+                # if normalize_weights = TRUE, get n_output_table
+                if(normalize_weights == TRUE) {
+                        n_output_table <- data %>% group_by(!!!rows_syms) %>% count() %>% ungroup() 
+                }
+                
+                if(normalize_weights == FALSE) {
+                        n_output_table <- data %>% group_by(!!!rows_syms) %>% count(wt = weights) %>% ungroup() 
+                }
                 
                 # create n_output_table_initial that is just a copy of n_output_table
                 # since this will be needed to get row_var_tbl for attributes
@@ -398,20 +430,18 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         count(wt = weights) %>% ungroup() 
                 
                 # get output_col_vars (this format is needed to bind_rows with data later on)
-                output_col_vars <- map_dfc(.x = cols, 
-                                           .f = ~create_output_vars(.x, 
-                                                                    n_output_table_initial = n_output_table_initial)) %>% 
+                output_col_vars <- map2_dfc(.x = cols, .y = 1:length(cols),
+                                           .f = ~ create_output_vars(current_var_name = .x, 
+                                                                     current_var_number = .y,
+                                    n_output_table_initial = n_output_table_initial)) %>% 
+                        select(!!!rows_syms, !!!cols_syms, starts_with("output_var_")) %>%
                         rename_at(.vars = vars(contains("output_var")), 
-                                  .funs = ~ str_replace(string = ., pattern = "output_var", replacement = "output_col"))
-                
-                # get final_output_col_vars, which collapses the output_col to how they'll look in final output
-                final_output_col_vars <- output_col_vars %>% 
-                        unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
-                        distinct(col_vars)
-                
+                                  .funs = ~ str_replace(string = ., pattern = "output_var", 
+                                                        replacement = "output_col")) %>%
+                        unite(col = row_index_key, !!!rows_syms, !!!cols_syms, sep = "_", remove = FALSE)
+           
                 # get row_index_key_tbl
-                row_index_key_tbl <- n_output_table_initial %>% select(-n) %>% bind_cols(., output_col_vars) %>% 
-                        unite(col = row_index_key, !!!rows_syms, !!!cols_syms, sep = "_", remove = FALSE) %>% 
+                row_index_key_tbl <- output_col_vars %>%
                         mutate(row_index_tbl_row_number = row_number())
                 
                 # get n_output_table
@@ -424,7 +454,6 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
                         mutate(col_vars = str_c(col_vars, "__n")) %>%
                         spread(key = col_vars, value = n)
-                
         }
         
         # test that n_output_table accounts for every observation somewhere 
@@ -442,20 +471,22 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         #################################################################################################
         
         
-        # get metadata to save as attributes
-        
-        
-        # use row_index_key_tbl to create row_var_tbl and col_var_tbl
+        # use row_index_key_tbl to create row_var_tbl and col_var_tbl, which are saved as attributes
         if(cols_present == TRUE) {
+                
                 # create col_var_tbl
-                col_var_tbl <- map_dfc(.x = cols, .f = ~create_output_vars(.x,
-                                                                           n_output_table_initial = n_output_table_initial)) %>% distinct() %>%
-                        rename_at(.vars = vars(contains("output_var")), 
-                                  .funs = ~ str_replace(string = ., pattern = "output_var", 
+                col_var_tbl <- map2_dfc(.x = cols, .y = 1:length(cols), 
+                                        .f = ~ create_output_vars(current_var_name = .x, 
+                                                                  current_var_number = .y,
+                                n_output_table_initial = n_output_table_initial)) %>% 
+                        select(!!!cols_syms, starts_with("output_var_")) %>%
+                        rename_at(.vars = vars(contains("output_var")),
+                                  .funs = ~ str_replace(string = ., pattern = "output_var",
                                                         replacement = "output_col")) %>%
-                        bind_cols(row_index_key_tbl %>% select(!!!cols_syms) %>% distinct(), .) %>%
-                        unite(col = col_vars, starts_with("output_col"), sep = "_x_", remove = FALSE) %>% 
-                        select(col_vars, everything()) %>% select(2:ncol(.), 1)
+                        unite(col = combined_output_col_vars, starts_with("output_col"), 
+                              sep = "_x_", remove = FALSE) %>% 
+                        select(!!!cols_syms, starts_with("output_col_"), 
+                               combined_output_col_vars)
         } else {
                 col_var_tbl <- NA
         }
@@ -465,39 +496,35 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         
         
         # create row_var_tbl
-        
-        # get output_row_vars 
-        output_row_vars <- map_dfc(.x = rows, 
-                                   .f = ~create_output_vars(.x, n_output_table_initial = n_output_table_initial)) %>%
+        row_var_tbl <- map2_dfc(.x = rows, .y = 1:length(rows),
+                                   .f = ~ create_output_vars(current_var_name = .x, 
+                                                             current_var_number = .y, 
+                                                n_output_table_initial = n_output_table_initial)) %>%
+                select(!!!rows_syms, starts_with("output_var_")) %>%
                 rename_at(.vars = vars(contains("output_var")), 
-                          .funs = ~ str_replace(string = ., pattern = "output_var", replacement = "output_row"))
+                          .funs = ~ str_replace(string = ., 
+                                                pattern = "output_var", replacement = "output_row")) %>%
+                unite(col = final_output_row_vars, starts_with("output_row"), sep = "_x_", remove = FALSE) %>%
+                select(!!!rows_syms, starts_with("output_row_"), everything())
         
-        # get final_output_row_vars, which collapses the output_row to how they'll look in final output
-        final_output_row_vars <- output_row_vars %>% 
-                unite(col = row_vars, starts_with("output_row"), sep = "_x_") %>%
-                distinct(row_vars)
-        
-        # get row_var_tbl
-        row_var_tbl <- n_output_table %>% select(!!!rows_syms) %>% bind_cols(., output_row_vars %>% distinct()) %>% 
-                bind_cols(., final_output_row_vars)
-        
-        
+
         ################################################################################################
         ################################################################################################
         
         
-        # get pct_output_table
+        # get pct_all_output_table
         
-        # with cols_present = FALSE and pct_type = all
-        if("pct" %in% stats & cols_present == FALSE & pct_type == "all") {
+        # with cols_present = FALSE
+        if("pct_all" %in% stats & cols_present == FALSE) {
                 
-                # get pct_output_table
-                pct_output_table <- n_output_table %>% mutate(sum_n = sum(n, na.rm = TRUE), pct = n / sum_n) %>%
+                # get pct_all_output_table
+                pct_all_output_table <- n_output_table %>% 
+                        mutate(sum_n = sum(n, na.rm = TRUE), pct_all = n / sum_n) %>%
                         select(-c(n, sum_n))
         }
         
-        # with cols_present = TRUE and pct_type = all
-        if("pct" %in% stats & cols_present == TRUE & pct_type == "all") {
+        # with cols_present = TRUE
+        if("pct_all" %in% stats & cols_present == TRUE) {
                 
                 # get sum_n across all columns
                 sum_n <- n_output_table %>% select(-c(!!!rows_syms)) %>% 
@@ -505,36 +532,39 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         dplyr::summarize(sum_n = sum(value, na.rm = TRUE)) %>% pull(sum_n)
                 
                 # get percentages across all columns
-                pct_output_table <- n_output_table %>% select(-c(!!!rows_syms)) %>% 
+                pct_all_output_table <- n_output_table %>% select(-c(!!!rows_syms)) %>% 
                         map_dfr(.x = ., .f = ~ .x / sum_n) %>% 
                         bind_cols(n_output_table %>% select(!!!rows_syms), .)
                 
                 # add stat to variable names
-                names(pct_output_table) <- str_replace(string = names(pct_output_table),
+                names(pct_all_output_table) <- str_replace(string = names(pct_all_output_table),
                                                        pattern = regex("__n$"), 
-                                                       replacement = "__pct")
+                                                       replacement = "__pct_all")
         }
         
         
         ####################################################################################
         
         
-        # with cols_present = TRUE and pct_type = row
-        if("pct" %in% stats & cols_present == FALSE & pct_type == "row") {
+        # get pct_row_output_table
+        
+        # with cols_present = TRUE
+        if("pct_row" %in% stats & cols_present == FALSE) {
                 
-                # get pct_output_table
-                pct_output_table <- n_output_table %>% mutate(pct = n / n) %>% select(-n)
+                # get pct_row_output_table
+                pct_row_output_table <- n_output_table %>% mutate(pct_row = n / n) %>% select(-n)
         }
         
-        # with cols_present = FALSE and pct_type = row
-        if("pct" %in% stats & cols_present == TRUE & pct_type == "row") {
+        # with cols_present = FALSE
+        if("pct_row" %in% stats & cols_present == TRUE ) {
                 
                 # get col variables from n_output_table that are now united
-                non_row <- tibble(var_names = names(n_output_table)) %>% filter(!(var_names %in% rows)) %>% pull(var_names)
+                non_row <- tibble(var_names = names(n_output_table)) %>% 
+                        filter(!(var_names %in% rows)) %>% pull(var_names)
                 non_rows_syms <- syms(non_row)
                 
-                # get pct_output_table
-                pct_output_table <- n_output_table %>% select(!!!non_rows_syms) %>%
+                # get pct_row_output_table
+                pct_row_output_table <- n_output_table %>% select(!!!non_rows_syms) %>%
                         rowSums(na.rm = TRUE) %>% tibble(row_sum = .) %>%
                         bind_cols(n_output_table, .) %>%
                         gather(key = variable, value = value, -c(!!!rows_syms, row_sum)) %>%
@@ -542,24 +572,26 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         spread(key = variable, value = value_pct)
                 
                 # add stat to variable names
-                names(pct_output_table) <- str_replace(string = names(pct_output_table),
+                names(pct_row_output_table) <- str_replace(string = names(pct_row_output_table),
                                                        pattern = regex("__n$"),
-                                                       replacement = "__pct")
+                                                       replacement = "__pct_row")
         }
         
         
         ######################################################################################3
         
         
-        # with cols_present = TRUE and pct_type = col
-        if("pct" %in% stats & cols_present == FALSE & pct_type == "col") {
+        # get pct_col_output_table
+        
+        # with cols_present = FALSE
+        if("pct_col" %in% stats & cols_present == FALSE) {
                 
-                # get pct_output_table
-                pct_output_table <- n_output_table %>% mutate(pct = n / sum(n)) %>% select(-n)
+                # get pct_col_output_table
+                pct_col_output_table <- n_output_table %>% mutate(pct_col = n / sum(n)) %>% select(-n)
         }
         
-        # with cols_present = FALSE and pct_type = col
-        if("pct" %in% stats & cols_present == TRUE & pct_type == "col") {
+        # with cols_present = TRUE
+        if("pct_col" %in% stats & cols_present == TRUE) {
                 
                 # get col var names that are now united
                 non_row <- tibble(var_names = names(n_output_table)) %>% 
@@ -584,20 +616,20 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                                 gather(key = variable, value = sum_n)
                 }
                 
-                # get col_sums_tbl to join with n_output_table for calculating pct
+                # get col_sums_tbl to join with n_output_table for calculating pct_col
                 col_sums_tbl <- map2_dfr(.x = col_sums_table, .y = col_sums_table_vars, .f = get_col_sums_tbl)
                 
-                # get pct_output_table
-                pct_output_table <- n_output_table %>% 
+                # get pct_col_output_table
+                pct_col_output_table <- n_output_table %>% 
                         gather(key = variable, value = n, -c(!!!rows_syms)) %>%
-                        left_join(., col_sums_tbl, by = "variable") %>% mutate(pct = n / sum_n) %>%
-                        select(!!!rows_syms, variable, pct) %>%
-                        spread(key = variable, value = pct)
+                        left_join(., col_sums_tbl, by = "variable") %>% mutate(pct_col = n / sum_n) %>%
+                        select(!!!rows_syms, variable, pct_col) %>%
+                        spread(key = variable, value = pct_col)
                 
                 # add stat to variable names
-                names(pct_output_table) <- str_replace(string = names(pct_output_table),
+                names(pct_col_output_table) <- str_replace(string = names(pct_col_output_table),
                                                        pattern = regex("__n$"), 
-                                                       replacement = "__pct")
+                                                       replacement = "__pct_col")
         }
         
         
@@ -605,10 +637,10 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         ######################################################################################
         
         
-        # get valid_pct_output_table
+        # get valid_pct_col/row/all_output_table
         
-        # get valid_pct_output_table_row
-        if("valid_pct" %in% stats) {
+        # get valid_pct_output_table_row, regardless of row/col/all type
+        if("valid_pct_row" %in% stats | "valid_pct_col" %in% stats | "valid_pct_all" %in% stats) {
                 
                 # get valid_pct_output_table row
                 valid_pct_output_table_row <- map(.x = rows, 
@@ -621,41 +653,17 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         ################
         
         
-        # if cols_present = FALSE and pct_type = "all"
-        if("valid_pct" %in% stats & cols_present == FALSE) {
-                
-                # get n_output_table_for_valid_pct
-                n_output_table_for_valid_pct <- n_output_table %>% mutate(row_number = row_number()) %>%
-                        select(-c(!!!rows_syms)) %>%
-                        left_join(valid_pct_output_table_row, ., by = "row_number")
-                
-                # get valid_pct_output_table, depending on pct_type
-                if(pct_type == "all") {
-                        
-                        # get valid_pct_output_table
-                        valid_pct_output_table <- n_output_table_for_valid_pct %>% 
-                                mutate(sum_n = sum(n, na.rm = TRUE), valid_pct = n / sum_n) %>%
-                                select(-c(n, sum_n))
-                        
-                } else if(pct_type == "row") {
-                        
-                        # get valid_pct_output_table
-                        valid_pct_output_table <- n_output_table_for_valid_pct %>% mutate(valid_pct = n / n)
-                        
-                } else if(pct_type == "col") {
-                        
-                        # get valid_pct_output_table
-                        valid_pct_output_table <- n_output_table_for_valid_pct %>% 
-                                mutate(valid_pct = n / sum(n)) %>% select(-n)
-                        
-                }
+        # get finalize_valid_pct_output_table_wo_cols function, 
+        # used when cols_present = FALSE, regardless of row/col/all type
+        finalize_valid_pct_output_table_wo_cols <- function(valid_pct_output_table, pct_type) {
                 
                 # add back the NA row
+                valid_pct_suffix <- str_c("valid_pct_", pct_type)
                 valid_pct_output_table <- n_output_table %>% mutate(row_number = row_number()) %>% 
                         anti_join(., valid_pct_output_table_row, by = "row_number") %>%
                         map_at(.x = ., 
                                .at = n_output_table %>% select(-c(!!!rows_syms)) %>% names(), .f = ~ NA) %>%
-                        as_tibble() %>% select(-row_number) %>% rename(valid_pct = n) %>%
+                        as_tibble() %>% select(-row_number) %>% rename(!!sym(valid_pct_suffix) := n) %>%
                         bind_rows(valid_pct_output_table, .) %>% select(-row_number)
                 
                 # reorder row of valid_pct_output_table based on n_output_table
@@ -664,13 +672,54 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         left_join(n_output_table %>% unite(col = united_row_index, !!!rows_syms) %>% 
                                           select(united_row_index), ., by = "united_row_index") %>%
                         select(-united_row_index)
+                
+                return(valid_pct_output_table)
+        }
+        
+        
+        ################
+        
+        
+        # if cols_present = FALSE
+        if(("valid_pct_row" %in% stats | "valid_pct_col" %in% stats | "valid_pct_all" %in% stats) & 
+           cols_present == FALSE) {
+                
+                # get n_output_table_for_valid_pct
+                n_output_table_for_valid_pct <- n_output_table %>% mutate(row_number = row_number()) %>%
+                        select(-c(!!!rows_syms)) %>%
+                        left_join(valid_pct_output_table_row, ., by = "row_number")
+                
+                # get valid_pct_all_output_table
+                if("valid_pct_all" %in% stats) {
+                        
+                        valid_pct_all_output_table <- n_output_table_for_valid_pct %>% 
+                                mutate(sum_n = sum(n, na.rm = TRUE), valid_pct_all = n / sum_n) %>%
+                                select(-c(n, sum_n)) %>% 
+                                finalize_valid_pct_output_table_wo_cols(pct_type = "all")
+                } 
+                
+                # get valid_pct_row_output_table
+                if("valid_pct_row" %in% stats) {
+                        
+                        valid_pct_row_output_table <- n_output_table_for_valid_pct %>% 
+                                mutate(valid_pct_row = n / n) %>% select(-n) %>% 
+                                finalize_valid_pct_output_table_wo_cols(pct_type = "row")
+                } 
+                
+                # get valid_pct_col_output_table
+                if("valid_pct_col" %in% stats) {
+                        
+                        valid_pct_col_output_table <- n_output_table_for_valid_pct %>% 
+                                mutate(valid_pct_col = n / sum(n)) %>% select(-n) %>% 
+                                finalize_valid_pct_output_table_wo_cols(pct_type = "col")
+                }
         }
         
         
         #################
         
         
-        # create get_na_output_col_vars function 
+        # create get_na_output_col_vars function, used when cols_present = TRUE, regardless if row/col/all type
         get_na_output_col_vars <- function(.x, current_stat) {
                 
                 # get current col
@@ -701,8 +750,10 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         #################
         
         
-        # get valid_pct_output_col_vars, for use calculating valid_pct regardless of whether pct_type = all/row/col
-        if("valid_pct" %in% stats & cols_present == TRUE) {
+        # get valid_pct_output_col_vars, for use calculating valid_pct when cols_present = TRUE,
+        # regardless of whether pct_type = all/row/col
+        if(("valid_pct_row" %in% stats | "valid_pct_col" %in% stats | "valid_pct_all" %in% stats) & 
+           cols_present == TRUE) {
                 
                 # call get_na_output_col_vars
                 na_output_col_vars <- map(.x = cols,
@@ -729,83 +780,12 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         }
         
         
-        ##########################
+        ########################
         
         
-        # if cols_present = TRUE and pct_type = "all"
-        if("valid_pct" %in% stats & cols_present == TRUE) {
-                
-                # get n_output_table_for_valid_pct
-                n_output_table_for_valid_pct <- n_output_table %>% mutate(row_number = row_number()) %>%
-                        select(-c(!!!rows_syms)) %>%
-                        left_join(valid_pct_output_table_row, ., by = "row_number") %>%
-                        select(!!!syms(valid_pct_output_col_vars))
-                
-                if(pct_type == "all") {
-                        
-                        # get sum_n across all columns
-                        sum_n <- n_output_table_for_valid_pct %>%
-                                select(-c(!!!rows_syms)) %>%
-                                map(.x = ., .f = ~ sum(.x, na.rm = TRUE)) %>% enframe() %>% 
-                                unnest(cols = value) %>%
-                                dplyr::summarize(sum_n = sum(value, na.rm = TRUE)) %>% pull(sum_n)
-                        
-                        # get percentages across all columns
-                        valid_pct_output_table <- n_output_table_for_valid_pct %>% select(-c(!!!rows_syms)) %>%
-                                map_dfr(.x = ., .f = ~ .x / sum_n) %>%
-                                bind_cols(n_output_table_for_valid_pct %>% select(!!!rows_syms), .)
-                        
-                } else if(pct_type == "row") {
-                        
-                        # get col variables from n_output_table that are now united
-                        non_row <- tibble(var_names = names(n_output_table_for_valid_pct)) %>% 
-                                filter(!(var_names %in% rows)) %>% pull(var_names)
-                        non_rows_syms <- syms(non_row)
-                        
-                        # get valid_pct_output_table
-                        valid_pct_output_table <- n_output_table_for_valid_pct %>% select(!!!non_rows_syms) %>%
-                                rowSums(na.rm = TRUE) %>% tibble(row_sum = .) %>%
-                                bind_cols(n_output_table_for_valid_pct, .) %>%
-                                gather(key = variable, value = value, -c(!!!rows_syms, row_sum)) %>%
-                                mutate(value_pct = value / row_sum) %>% select(!!!rows_syms, variable, value_pct) %>%
-                                spread(key = variable, value = value_pct)
-                        
-                } else if(pct_type == "col") {
-                        
-                        # get col var names that are now united
-                        non_row <- tibble(var_names = names(n_output_table_for_valid_pct)) %>% 
-                                filter(!(var_names %in% rows)) %>% pull(var_names)
-                        non_rows_syms <- syms(non_row)
-                        
-                        # get sum of all col vars
-                        col_sums_table <- n_output_table_for_valid_pct %>% select(!!!non_rows_syms) %>% 
-                                colSums(na.rm = TRUE)
-                        col_sums_table_vars <- names(col_sums_table)
-                        
-                        # create get_col_sums_tbl function
-                        get_col_sums_tbl <- function(.x, .y) {
-                                
-                                # get current value and var name/sym
-                                current_col_sums_table_value <- .x
-                                current_col_sums_table_var <- .y
-                                current_col_sums_table_var_sym <- sym(current_col_sums_table_var)
-                                
-                                # create tbl
-                                tibble(!!current_col_sums_table_var_sym := current_col_sums_table_value) %>%
-                                        gather(key = variable, value = sum_n)
-                        }
-                        
-                        # get col_sums_tbl to join with n_output_table for calculating pct
-                        col_sums_tbl <- map2_dfr(.x = col_sums_table, .y = col_sums_table_vars, .f = get_col_sums_tbl)
-                        
-                        # get pct_output_table
-                        valid_pct_output_table <- n_output_table_for_valid_pct %>% 
-                                gather(key = variable, value = n, -c(!!!rows_syms)) %>%
-                                left_join(., col_sums_tbl, by = "variable") %>% mutate(pct = n / sum_n) %>%
-                                select(!!!rows_syms, variable, pct) %>%
-                                spread(key = variable, value = pct)
-                        
-                }
+        # get finalize_valid_pct_output_table_w_cols, 
+        # used when cols_present = TRUE, regardless if row/col/all type
+        finalize_valid_pct_output_table_w_cols <- function(valid_pct_output_table, pct_type) {
                 
                 # add back the NA col, ensuring all values are set to NA since they shouldn't have valid_pct
                 valid_pct_output_table <- n_output_table %>% select(!!!syms(na_output_col_vars)) %>%
@@ -831,11 +811,102 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         select(-united_row_index)
                 
                 # add stat to variable names
+                valid_pct_suffix <- str_c("__valid_pct_", pct_type)
                 names(valid_pct_output_table) <- valid_pct_output_table %>%
                         select(-c(!!!rows_syms)) %>% names() %>%
-                        str_replace(string = ., pattern = regex("__n$"), replacement = "__valid_pct") %>%
+                        str_replace(string = ., pattern = regex("__n$"), replacement = valid_pct_suffix) %>%
                         c(rows, .)
                 
+                return(valid_pct_output_table)
+        }
+        
+        
+        ##########################
+        
+        
+        # if cols_present = TRUE and pct_type = "all"
+        if(("valid_pct_row" %in% stats | "valid_pct_col" %in% stats | "valid_pct_all" %in% stats) & 
+           cols_present == TRUE) {
+                
+                # get n_output_table_for_valid_pct
+                n_output_table_for_valid_pct <- n_output_table %>% mutate(row_number = row_number()) %>%
+                        select(-c(!!!rows_syms)) %>%
+                        left_join(valid_pct_output_table_row, ., by = "row_number") %>%
+                        select(!!!syms(valid_pct_output_col_vars))
+                
+                if("valid_pct_all" %in% stats) {
+                        
+                        # get sum_n across all columns
+                        sum_n <- n_output_table_for_valid_pct %>%
+                                select(-c(!!!rows_syms)) %>%
+                                map(.x = ., .f = ~ sum(.x, na.rm = TRUE)) %>% enframe() %>% 
+                                unnest(cols = value) %>%
+                                dplyr::summarize(sum_n = sum(value, na.rm = TRUE)) %>% pull(sum_n)
+                        
+                        # get_valid_pct_all_output_table
+                        valid_pct_all_output_table <- n_output_table_for_valid_pct %>% 
+                                select(-c(!!!rows_syms)) %>%
+                                map_dfr(.x = ., .f = ~ .x / sum_n) %>%
+                                bind_cols(n_output_table_for_valid_pct %>% select(!!!rows_syms), .) %>%
+                                finalize_valid_pct_output_table_w_cols(pct_type = "all")
+                        
+                } 
+                
+                if("valid_pct_row" %in% stats) {
+                        
+                        # get col variables from n_output_table that are now united
+                        non_row <- tibble(var_names = names(n_output_table_for_valid_pct)) %>% 
+                                filter(!(var_names %in% rows)) %>% pull(var_names)
+                        non_rows_syms <- syms(non_row)
+                        
+                        # get valid_pct_row_output_table
+                        valid_pct_row_output_table <- n_output_table_for_valid_pct %>% select(!!!non_rows_syms) %>%
+                                rowSums(na.rm = TRUE) %>% tibble(row_sum = .) %>%
+                                bind_cols(n_output_table_for_valid_pct, .) %>%
+                                gather(key = variable, value = value, -c(!!!rows_syms, row_sum)) %>%
+                                mutate(value_pct = value / row_sum) %>% select(!!!rows_syms, variable, value_pct) %>%
+                                spread(key = variable, value = value_pct) %>%
+                                finalize_valid_pct_output_table_w_cols(pct_type = "row")
+                        
+                } 
+                
+                if("valid_pct_col" %in% stats) {
+                        
+                        # get col var names that are now united
+                        non_row <- tibble(var_names = names(n_output_table_for_valid_pct)) %>% 
+                                filter(!(var_names %in% rows)) %>% pull(var_names)
+                        non_rows_syms <- syms(non_row)
+                        
+                        # get sum of all col vars
+                        col_sums_table <- n_output_table_for_valid_pct %>% select(!!!non_rows_syms) %>% 
+                                colSums(na.rm = TRUE)
+                        col_sums_table_vars <- names(col_sums_table)
+                        
+                        # create get_col_sums_tbl function
+                        get_col_sums_tbl <- function(.x, .y) {
+                                
+                                # get current value and var name/sym
+                                current_col_sums_table_value <- .x
+                                current_col_sums_table_var <- .y
+                                current_col_sums_table_var_sym <- sym(current_col_sums_table_var)
+                                
+                                # create tbl
+                                tibble(!!current_col_sums_table_var_sym := current_col_sums_table_value) %>%
+                                        gather(key = variable, value = sum_n)
+                        }
+                        
+                        # get col_sums_tbl to join with n_output_table for calculating pct
+                        col_sums_tbl <- map2_dfr(.x = col_sums_table, .y = col_sums_table_vars, 
+                                                 .f = get_col_sums_tbl)
+                        
+                        # get pct_output_table
+                        valid_pct_col_output_table <- n_output_table_for_valid_pct %>% 
+                                gather(key = variable, value = n, -c(!!!rows_syms)) %>%
+                                left_join(., col_sums_tbl, by = "variable") %>% mutate(pct = n / sum_n) %>%
+                                select(!!!rows_syms, variable, pct) %>%
+                                spread(key = variable, value = pct) %>% 
+                                finalize_valid_pct_output_table_w_cols(pct_type = "col")
+                }
         }
         
         
@@ -850,7 +921,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                 current_stat_var <- .x
                 
                 # get current_stat_var_sym 
-                current_stat_var_sym <- ensym(current_stat_var)
+                current_stat_var_sym <- sym(current_stat_var)
                 
                 # get n_distinct_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
@@ -858,11 +929,10 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         # get n_distinct_output_table
                         n_distinct_output_table <- data %>% group_by(!!!rows_syms) %>% 
                                 distinct(!!current_stat_var_sym) %>%
-                                count(!!!rows_syms) %>% ungroup() %>%
-                                select(-c(!!!rows_syms))
-                        
+                                count(!!!rows_syms) %>% ungroup()
+
                         # rename stat
-                        names(n_distinct_output_table) <- str_c("n_distinct.", current_stat_var)
+                        names(n_distinct_output_table) <- c(rows, str_c("n_distinct.", current_stat_var))
                 }
                 
                 # get n_distinct_output_table if cols_present = TRUE
@@ -889,134 +959,8 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         if("n_distinct" %in% stats) {
                 
                 # call loop_through_stat_vars_get_mean
-                n_distinct_output_table <- map_dfc(.x = stat_vars, .f = loop_through_stat_vars_get_n_distinct) 
-        }
-        
-        
-        ################################################################################################
-        ################################################################################################
-        
-        
-        # create loop_through_stat_vars_get_mean function
-        loop_through_stat_vars_get_mean <- function(.x) {
-                
-                # get current_stat_var
-                current_stat_var <- .x
-                
-                # get current_stat_var_sym 
-                current_stat_var_sym <- sym(current_stat_var)
-                
-                # get mean_output_table if cols_present = FALSE
-                if(cols_present == FALSE) {
-                        
-                        # get mean_output_table
-                        mean_output_table <- data %>% group_by(!!!rows_syms) %>% 
-                                dplyr::summarize(mean = wtd.mean(!!current_stat_var_sym, weights = weights, 
-                                                                 normwt = normalize_weights, na.rm = TRUE)) %>% 
-                                ungroup() %>%  select(-c(!!!rows_syms))
-                        
-                        
-                        # get current_stat_variable_name
-                        current_stat_variable_name <- str_c("mean.", current_stat_var)
-                        current_stat_variable_name_sym <- ensym(current_stat_variable_name)
-                        
-                        # rename current_stat_variable_name
-                        mean_output_table <- mean_output_table %>%
-                                rename(!!current_stat_variable_name_sym := "mean") 
-                        
-                        return(mean_output_table)
-                }
-                
-                
-                # get mean_output_table if cols_present = TRUE
-                if(cols_present == TRUE) {
-                        
-                        # get mean_output_table
-                        mean_output_table <- data %>% 
-                                group_by(!!!rows_syms, !!!cols_syms) %>% 
-                                dplyr::summarize(mean = wtd.mean(!!current_stat_var_sym, weights = weights, 
-                                                                 normwt = normalize_weights, na.rm = TRUE)) %>% 
-                                ungroup() %>%
-                                unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
-                                left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
-                                          by = "row_index_key") %>%
-                                arrange(row_index_tbl_row_number) %>% 
-                                select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
-                                unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
-                                mutate(col_vars = str_c(col_vars, "__mean", ".", current_stat_var)) %>%
-                                spread(key = col_vars, value = mean) 
-                        
-                        return(mean_output_table)
-                }
-        }
-        
-        # create mean_output_table 
-        if("mean" %in% stats) {
-                
-                # call loop_through_stat_vars_get_mean
-                mean_output_table <- map_dfc(.x = stat_vars_numeric, .f = loop_through_stat_vars_get_mean) 
-        }
-        
-        
-        ################################################################################################
-        ################################################################################################
-        
-        
-        # create loop_through_stat_vars_get_median function
-        loop_through_stat_vars_get_median <- function(.x) {
-                
-                # get current_stat_var
-                current_stat_var <- .x
-                
-                # get current_stat_var_sym 
-                current_stat_var_sym <- ensym(current_stat_var)
-                
-                # get median_output_table if cols_present = FALSE
-                if(cols_present == FALSE) {
-                        
-                        # get median_output_table
-                        median_output_table <- data %>% group_by(!!!rows_syms) %>% 
-                                dplyr::summarize(median = list(enframe(wtd.quantile(!!current_stat_var_sym, 
-                                                                                    probs = .5, weights = weights, 
-                                                                                    normwt = normalize_weights, na.rm = TRUE)))) %>% 
-                                unnest(cols = median) %>% ungroup() %>% 
-                                mutate(name = str_c("median", ".", current_stat_var)) %>%
-                                spread(key = name, value = value) %>%
-                                select(-c(!!!rows_syms)) 
-                        
-                        return(median_output_table)
-                }
-                
-                
-                # get median_output_table if cols_present = TRUE
-                if(cols_present == TRUE) {
-                        
-                        # get median_output_table
-                        median_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms) %>% 
-                                dplyr::summarize(median = list(enframe(wtd.quantile(!!current_stat_var_sym, 
-                                                                                    probs = .5, weights = weights, 
-                                                                                    normwt = normalize_weights, na.rm = TRUE)))) %>% 
-                                unnest(cols = median) %>% ungroup() %>% 
-                                mutate(name = "median") %>%
-                                spread(key = name, value = value) %>% 
-                                unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
-                                left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
-                                          by = "row_index_key") %>%
-                                arrange(row_index_tbl_row_number) %>% 
-                                select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
-                                unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
-                                mutate(col_vars = str_c(col_vars, "__median", ".", current_stat_var)) %>%
-                                spread(key = col_vars, value = median) 
-                        
-                        return(median_output_table)
-                }
-        }
-        
-        # create median_output_table 
-        if("median" %in% stats) {
-                
-                # call loop_through_stat_vars_get_median
-                median_output_table <- map_dfc(.x = stat_vars_numeric, .f = loop_through_stat_vars_get_median) 
+                n_distinct_output_table <- map(.x = stat_vars, .f = loop_through_stat_vars_get_n_distinct) %>%
+                        reduce(left_join, by = rows)
         }
         
         
@@ -1031,7 +975,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                 current_stat_var <- .x
                 
                 # get current_stat_var_sym 
-                current_stat_var_sym <- ensym(current_stat_var)
+                current_stat_var_sym <- sym(current_stat_var)
                 
                 # get mode_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
@@ -1047,8 +991,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                                         arrange(desc(n), !!current_stat_var_sym) %>% 
                                         slice(1) %>%
                                         ungroup() %>% select(-n) %>% 
-                                        rename(mode := !!current_stat_var) %>%
-                                        select(-c(!!!rows_syms))
+                                        rename(mode := !!current_stat_var)
                         }
                         
                         # get mode_output_table, if normalize_weights = FALSE
@@ -1069,14 +1012,13 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                                         arrange(desc(n), !!current_stat_var_sym) %>% 
                                         slice(1) %>%
                                         ungroup() %>% select(-n) %>% 
-                                        rename(mode := !!current_stat_var) %>%
-                                        select(-c(!!!rows_syms))
+                                        rename(mode := !!current_stat_var)
                         }
                         
                         
                         # get current_stat_variable_name
                         current_stat_variable_name <- str_c("mode.", current_stat_var)
-                        current_stat_variable_name_sym <- ensym(current_stat_variable_name)
+                        current_stat_variable_name_sym <- sym(current_stat_variable_name)
                         
                         # rename current_stat_variable_name
                         mode_output_table <- mode_output_table %>%
@@ -1147,7 +1089,200 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         if("mode" %in% stats) {
                 
                 # call loop_through_stat_vars_get_mode
-                mode_output_table <- map_dfc(.x = stat_vars, .f = loop_through_stat_vars_get_mode) 
+                mode_output_table <- map(.x = stat_vars, .f = loop_through_stat_vars_get_mode) %>%
+                        reduce(left_join, by = rows)
+        }
+        
+        
+        ################################################################################################
+        ################################################################################################
+        
+        
+        # create loop_through_stat_vars_get_sum function
+        loop_through_stat_vars_get_sum <- function(.x) {
+
+                # get current_stat_var
+                current_stat_var <- .x
+
+                # get current_stat_var_sym
+                current_stat_var_sym <- sym(current_stat_var)
+
+                # get sum_output_table if cols_present = FALSE
+                if(cols_present == FALSE) {
+
+                        # get sum_output_table
+                        sum_output_table <- data %>% group_by(!!!rows_syms) %>%
+                                dplyr::summarize(sum = sum(!!current_stat_var_sym * weights)) %>%
+                                ungroup()
+
+
+                        # get current_stat_variable_name
+                        current_stat_variable_name <- str_c("sum.", current_stat_var)
+                        current_stat_variable_name_sym <- sym(current_stat_variable_name)
+
+                        # rename current_stat_variable_name
+                        sum_output_table <- sum_output_table %>%
+                                rename(!!current_stat_variable_name_sym := "sum")
+
+                        return(sum_output_table)
+                }
+
+
+                # get sum_output_table if cols_present = TRUE
+                if(cols_present == TRUE) {
+
+                        # get sum_output_table
+                        sum_output_table <- data %>%
+                                group_by(!!!rows_syms, !!!cols_syms) %>%
+                                dplyr::summarize(sum = sum(!!current_stat_var_sym * weights)) %>%
+                                ungroup() %>%
+                                unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
+                                left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)),
+                                          by = "row_index_key") %>%
+                                arrange(row_index_tbl_row_number) %>%
+                                select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
+                                unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
+                                mutate(col_vars = str_c(col_vars, "__sum", ".", current_stat_var)) %>%
+                                spread(key = col_vars, value = sum)
+
+                        return(sum_output_table)
+                }
+        }
+
+        # create sum_output_table
+        if("sum" %in% stats) {
+
+                # call loop_through_stat_vars_get_sum
+                sum_output_table <- map(.x = stat_vars_numeric, .f = loop_through_stat_vars_get_sum) %>%
+                        reduce(left_join, by = rows)
+        }
+        
+        
+        ################################################################################################
+        ################################################################################################
+        
+        
+        # create loop_through_stat_vars_get_mean function
+        loop_through_stat_vars_get_mean <- function(.x) {
+                
+                # get current_stat_var
+                current_stat_var <- .x
+                
+                # get current_stat_var_sym 
+                current_stat_var_sym <- sym(current_stat_var)
+                
+                # get mean_output_table if cols_present = FALSE
+                if(cols_present == FALSE) {
+                        
+                        # get mean_output_table
+                        mean_output_table <- data %>% group_by(!!!rows_syms) %>% 
+                                dplyr::summarize(mean = wtd.mean(!!current_stat_var_sym, weights = weights, 
+                                                                 normwt = normalize_weights, na.rm = TRUE)) %>% 
+                                ungroup()
+                        
+                        
+                        # get current_stat_variable_name
+                        current_stat_variable_name <- str_c("mean.", current_stat_var)
+                        current_stat_variable_name_sym <- sym(current_stat_variable_name)
+                        
+                        # rename current_stat_variable_name
+                        mean_output_table <- mean_output_table %>%
+                                rename(!!current_stat_variable_name_sym := "mean") 
+                        
+                        return(mean_output_table)
+                }
+                
+                
+                # get mean_output_table if cols_present = TRUE
+                if(cols_present == TRUE) {
+                        
+                        # get mean_output_table
+                        mean_output_table <- data %>% 
+                                group_by(!!!rows_syms, !!!cols_syms) %>% 
+                                dplyr::summarize(mean = wtd.mean(!!current_stat_var_sym, weights = weights, 
+                                                                 normwt = normalize_weights, na.rm = TRUE)) %>% 
+                                ungroup() %>%
+                                unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
+                                left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
+                                          by = "row_index_key") %>%
+                                arrange(row_index_tbl_row_number) %>% 
+                                select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
+                                unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
+                                mutate(col_vars = str_c(col_vars, "__mean", ".", current_stat_var)) %>%
+                                spread(key = col_vars, value = mean) 
+                        
+                        return(mean_output_table)
+                }
+        }
+        
+        # create mean_output_table 
+        if("mean" %in% stats) {
+                
+                # call loop_through_stat_vars_get_mean
+                mean_output_table <- map(.x = stat_vars_numeric, .f = loop_through_stat_vars_get_mean) %>%
+                        reduce(left_join, by = rows)
+        }
+        
+        
+        ################################################################################################
+        ################################################################################################
+        
+        
+        # create loop_through_stat_vars_get_median function
+        loop_through_stat_vars_get_median <- function(.x) {
+                
+                # get current_stat_var
+                current_stat_var <- .x
+                
+                # get current_stat_var_sym 
+                current_stat_var_sym <- sym(current_stat_var)
+                
+                # get median_output_table if cols_present = FALSE
+                if(cols_present == FALSE) {
+                        
+                        # get median_output_table
+                        median_output_table <- data %>% group_by(!!!rows_syms) %>% 
+                                dplyr::summarize(median = list(enframe(wtd.quantile(!!current_stat_var_sym, 
+                                                                                    probs = .5, weights = weights, 
+                                                                                    normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                unnest(cols = median) %>% ungroup() %>% 
+                                mutate(name = str_c("median", ".", current_stat_var)) %>%
+                                spread(key = name, value = value)
+
+                        return(median_output_table)
+                }
+                
+                
+                # get median_output_table if cols_present = TRUE
+                if(cols_present == TRUE) {
+                        
+                        # get median_output_table
+                        median_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms) %>% 
+                                dplyr::summarize(median = list(enframe(wtd.quantile(!!current_stat_var_sym, 
+                                                                                    probs = .5, weights = weights, 
+                                                                                    normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                unnest(cols = median) %>% ungroup() %>% 
+                                mutate(name = "median") %>%
+                                spread(key = name, value = value) %>% 
+                                unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
+                                left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
+                                          by = "row_index_key") %>%
+                                arrange(row_index_tbl_row_number) %>% 
+                                select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
+                                unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
+                                mutate(col_vars = str_c(col_vars, "__median", ".", current_stat_var)) %>%
+                                spread(key = col_vars, value = median) 
+                        
+                        return(median_output_table)
+                }
+        }
+        
+        # create median_output_table 
+        if("median" %in% stats) {
+                
+                # call loop_through_stat_vars_get_median
+                median_output_table <- map(.x = stat_vars_numeric, .f = loop_through_stat_vars_get_median) %>%
+                        reduce(left_join, by = rows)
         }
         
         
@@ -1162,7 +1297,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                 current_stat_var <- .x
                 
                 # get current_stat_var_sym 
-                current_stat_var_sym <- ensym(current_stat_var)
+                current_stat_var_sym <- sym(current_stat_var)
                 
                 # get sd_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
@@ -1172,12 +1307,12 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                                 dplyr::summarize(sd = suppressWarnings(sqrt(wtd.var(!!current_stat_var_sym, 
                                                                                     weights = weights, 
                                                                                     normwt = normalize_weights, na.rm = TRUE)))) %>% 
-                                ungroup() %>%  select(-c(!!!rows_syms))
+                                ungroup()
                         
                         
                         # get current_stat_variable_name
                         current_stat_variable_name <- str_c("sd.", current_stat_var)
-                        current_stat_variable_name_sym <- ensym(current_stat_variable_name)
+                        current_stat_variable_name_sym <- sym(current_stat_variable_name)
                         
                         # rename current_stat_variable_name
                         sd_output_table <- sd_output_table %>%
@@ -1214,7 +1349,9 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         if("sd" %in% stats) {
                 
                 # call loop_through_stat_vars_get_sd
-                sd_output_table <- map_dfc(.x = stat_vars_numeric, .f = loop_through_stat_vars_get_sd) 
+                sd_output_table <- map(.x = stat_vars_numeric, .f = loop_through_stat_vars_get_sd) %>%
+                        reduce(left_join, by = rows)
+                        
         }
         
         
@@ -1229,7 +1366,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                 current_stat_var <- .x
                 
                 # get current_stat_var_sym 
-                current_stat_var_sym <- ensym(current_stat_var)
+                current_stat_var_sym <- sym(current_stat_var)
                 
                 # get min_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
@@ -1237,11 +1374,11 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         # get min_output_table
                         min_output_table <- data %>% group_by(!!!rows_syms) %>% 
                                 dplyr::summarize(min = min(!!current_stat_var_sym, na.rm = TRUE)) %>% 
-                                ungroup() %>%  select(-c(!!!rows_syms))
+                                ungroup()
                         
                         # get current_stat_variable_name
                         current_stat_variable_name <- str_c("min.", current_stat_var)
-                        current_stat_variable_name_sym <- ensym(current_stat_variable_name)
+                        current_stat_variable_name_sym <- sym(current_stat_variable_name)
                         
                         # rename current_stat_variable_name
                         min_output_table <- min_output_table %>%
@@ -1276,7 +1413,8 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         if("min" %in% stats) {
                 
                 # call loop_through_stat_vars_get_min
-                min_output_table <- map_dfc(.x = stat_vars_numeric, .f = loop_through_stat_vars_get_min)
+                min_output_table <- map(.x = stat_vars_numeric, .f = loop_through_stat_vars_get_min) %>%
+                        reduce(left_join, by = rows)
         }
         
         
@@ -1291,7 +1429,7 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                 current_stat_var <- .x
                 
                 # get current_stat_var_sym 
-                current_stat_var_sym <- ensym(current_stat_var)
+                current_stat_var_sym <- sym(current_stat_var)
                 
                 # get max_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
@@ -1299,11 +1437,11 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         # get max_output_table
                         max_output_table <- data %>% group_by(!!!rows_syms) %>% 
                                 dplyr::summarize(max = max(!!current_stat_var_sym, na.rm = TRUE)) %>% 
-                                ungroup() %>%  select(-c(!!!rows_syms))
+                                ungroup()
                         
                         # get current_stat_variable_name
                         current_stat_variable_name <- str_c("max.", current_stat_var)
-                        current_stat_variable_name_sym <- ensym(current_stat_variable_name)
+                        current_stat_variable_name_sym <- sym(current_stat_variable_name)
                         
                         # rename current_stat_variable_name
                         max_output_table <- max_output_table %>%
@@ -1338,7 +1476,8 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         if("max" %in% stats) {
                 
                 # call loop_through_stat_vars_get_max
-                max_output_table <- map_dfc(.x = stat_vars_numeric, .f = loop_through_stat_vars_get_max)
+                max_output_table <- map(.x = stat_vars_numeric, .f = loop_through_stat_vars_get_max) %>%
+                        reduce(left_join, by = rows)
         }
         
         
@@ -1346,50 +1485,54 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         ################################################################################################
         
         
-        # create loop_through_stat_vars_get_quantiles function
-        loop_through_stat_vars_get_quantiles <- function(.x) {
+        # create loop_through_stat_vars_get_quantile function
+        loop_through_stat_vars_get_quantile <- function(.x) {
                 
                 # get current_stat_var
                 current_stat_var <- .x
                 
                 # get current_stat_var_sym 
-                current_stat_var_sym <- ensym(current_stat_var)
+                current_stat_var_sym <- sym(current_stat_var)
                 
-                # get quantiles_output_table if cols_present = FALSE
+                # get quantile_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
                         
-                        # get quantiles_order_syms, since by default q100 is place before q25
-                        quantiles_order_syms <- syms(str_c("q", round(quantiles, digits = 2) * 100))
+                        # get quantile_order_syms, since by default q100 is place before q25
+                        quantile_order_syms <- syms(str_c("q", round(quantile, digits = 2) * 100))
                         
-                        # get quantiles_output_table
-                        quantiles_output_table <- data %>% group_by(!!!rows_syms) %>% 
-                                dplyr::summarize(quantiles = list(enframe(wtd.quantile(!!current_stat_var_sym, 
-                                                                                       probs = quantiles, weights = weights, 
+                        # get quantile_output_table
+                        quantile_output_table <- data %>% group_by(!!!rows_syms) %>% 
+                                dplyr::summarize(quantile = list(enframe(wtd.quantile(!!current_stat_var_sym, 
+                                                                                       probs = quantile, weights = weights, 
                                                                                        normwt = normalize_weights, na.rm = TRUE)))) %>% 
-                                unnest(cols = quantiles) %>% ungroup() %>% 
+                                unnest(cols = quantile) %>% ungroup() %>% 
                                 mutate(name = str_squish(name),
                                        name = str_replace(string = name, pattern = "%", replacement = ""),
                                        name = round(as.numeric(name), digits = 0),
                                        name = as.character(name),
                                        name = str_c("q", str_squish(name))) %>%
-                                spread(key = name, value = value) %>%
-                                select(-c(!!!rows_syms)) %>% select(!!!quantiles_order_syms)
+                                spread(key = name, value = value)
                         
+                        # get quantile variable syms in order, to sort numerically
+                        # eg q100 should not precede q25, q50, and q75 due to default alphanumeric sorting
+                        quantile_order_syms <- syms(str_c("q", (round(quantile, digits = 2) * 100), ".", 
+                                                                current_stat_var))
                         
                         # get current_stat_variable_name
-                        current_stat_variable_name <- str_c("quantiles.", current_stat_var)
-                        current_stat_variable_name_sym <- ensym(current_stat_variable_name)
+                        current_stat_variable_name <- str_c("quantile.", current_stat_var)
+                        current_stat_variable_name_sym <- sym(current_stat_variable_name)
                         
-                        # rename current_stat_variable_name
-                        quantiles_output_table <- quantiles_output_table %>%
-                                rename_at(.vars = vars(everything()), 
-                                          .funs = ~ str_c(., ".", current_stat_var)) 
+                        # rename current_stat_variable_name, and reorder quantiles numerically
+                        quantile_output_table <- quantile_output_table %>%
+                                rename_at(.vars = vars(-c(!!!rows_syms)), 
+                                          .funs = ~ str_c(., ".", current_stat_var)) %>%
+                                select(!!!rows_syms, !!!quantile_order_syms)
                         
-                        return(quantiles_output_table)
+                        return(quantile_output_table)
                 }
                 
                 
-                # get quantiles_output_table if cols_present = TRUE
+                # get quantile_output_table if cols_present = TRUE
                 if(cols_present == TRUE) {
                         
                         # get collapsed_output_col_vars
@@ -1397,37 +1540,37 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                                 unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>% 
                                 distinct(col_vars) %>% arrange(col_vars) %>% pull(col_vars)
                         
-                        # get quantiles_order, since by default q100 is place before q25
-                        quantiles_order <- syms(str_c("q", round(quantiles, digits = 2) * 100, ".", current_stat_var))
+                        # get quantile_order, since by default q100 is place before q25
+                        quantile_order <- syms(str_c("q", round(quantile, digits = 2) * 100, ".", current_stat_var))
                         
-                        # create get_quantiles_ordered_vars function
-                        get_quantiles_ordered_vars <- function(.x) {
+                        # create get_quantile_ordered_vars function
+                        get_quantile_ordered_vars <- function(.x) {
                                 
                                 # get current_collapsed_output_col_var
                                 current_collapsed_output_col_var <- .x
                                 
-                                # loop through and join current_collapsed_output_col_var with quantiles_order 
-                                current_quantiles_ordered_var <- map(.x = quantiles_order, 
+                                # loop through and join current_collapsed_output_col_var with quantile_order 
+                                current_quantile_ordered_var <- map(.x = quantile_order, 
                                                                      .f = ~ str_c(current_collapsed_output_col_var, "__", .x)) %>%
                                         enframe() %>% unnest(cols = value) %>% select(value)
                                 
-                                return(current_quantiles_ordered_var)
+                                return(current_quantile_ordered_var)
                         }
                         
-                        # call get_quantiles_ordered_vars
-                        quantiles_ordered_vars <- map_dfr(.x = collapsed_output_col_vars, 
-                                                          .f = get_quantiles_ordered_vars) %>%
+                        # call get_quantile_ordered_vars
+                        quantile_ordered_vars <- map_dfr(.x = collapsed_output_col_vars, 
+                                                          .f = get_quantile_ordered_vars) %>%
                                 pull(value)
                         
-                        # get quantiles_ordered_vars_syms
-                        quantiles_ordered_vars_syms <- syms(quantiles_ordered_vars)
+                        # get quantile_ordered_vars_syms
+                        quantile_ordered_vars_syms <- syms(quantile_ordered_vars)
                         
-                        # get quantiles_output_table
-                        quantiles_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms) %>% 
-                                dplyr::summarize(quantiles = list(enframe(wtd.quantile(!!current_stat_var_sym, 
-                                                                                       probs = quantiles, weights = weights, 
+                        # get quantile_output_table
+                        quantile_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms) %>% 
+                                dplyr::summarize(quantile = list(enframe(wtd.quantile(!!current_stat_var_sym, 
+                                                                                       probs = quantile, weights = weights, 
                                                                                        normwt = normalize_weights, na.rm = TRUE)))) %>% 
-                                unnest(cols = quantiles) %>% ungroup() %>% 
+                                unnest(cols = quantile) %>% ungroup() %>% 
                                 mutate(name = str_squish(name),
                                        name = str_replace(string = name, pattern = "%", replacement = ""),
                                        name = round(as.numeric(name), digits = 0),
@@ -1444,18 +1587,19 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                                 gather(key = quantile, value = value, -c(!!!rows_syms, col_vars)) %>%
                                 unite(col = col_vars, col_vars, quantile, sep = "") %>%
                                 mutate(col_vars = str_c(col_vars, ".", current_stat_var, sep = "")) %>%
-                                spread(key = col_vars, value = value) %>% 
-                                select(!!!quantiles_ordered_vars)
-                        
-                        return(quantiles_output_table)
+                                spread(key = col_vars, value = value) 
+
+                        return(quantile_output_table)
                 }
         }
         
-        # create quantiles_output_table 
-        if("quantiles" %in% stats) {
+        # create quantile_output_table 
+        if("quantile" %in% stats) {
                 
-                # call loop_through_stat_vars_get_quantiles
-                quantiles_output_table <- map_dfc(.x = stat_vars_numeric, .f = loop_through_stat_vars_get_quantiles) 
+                # call loop_through_stat_vars_get_quantile
+                quantile_output_table <- map(.x = stat_vars_numeric, 
+                                              .f = loop_through_stat_vars_get_quantile) %>%
+                        reduce(left_join, by = rows)
         }
         
         
@@ -1474,10 +1618,25 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         current_stat <- .x
                         
                         if(current_stat == "n") {
-                                return(n_output_table %>% select(-c(!!!rows_syms)))
+                                return(n_output_table)
                         }
-                        if(current_stat == "pct") {
-                                return(pct_output_table %>% select(-c(!!!rows_syms)))
+                        if(current_stat == "pct_col") {
+                                return(pct_col_output_table)
+                        }
+                        if(current_stat == "pct_row") {
+                                return(pct_row_output_table)
+                        }
+                        if(current_stat == "pct_all") {
+                                return(pct_all_output_table)
+                        }
+                        if(current_stat == "valid_pct_col") {
+                                return(valid_pct_col_output_table)
+                        }
+                        if(current_stat == "valid_pct_row") {
+                                return(valid_pct_row_output_table)
+                        }
+                        if(current_stat == "valid_pct_all") {
+                                return(valid_pct_all_output_table)
                         }
                         if(current_stat == "n_distinct") {
                                 return(n_distinct_output_table)
@@ -1500,20 +1659,14 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         if(current_stat == "max") {
                                 return(max_output_table)
                         }
-                        if(current_stat == "quantiles") {
-                                return(quantiles_output_table)
+                        if(current_stat == "quantile") {
+                                return(quantile_output_table)
                         }
                 }
                 
                 # call loop_through_stat_wo_col
-                output_table <- map_dfc(.x = stats, .f = loop_through_stat_wo_col) 
-                
-                # add row_index to output_table
-                # note i need to count() row_index_tbl to arrange any NA values to be sorted first
-                # but arrange() always places NA values last, even arrange(desc())
-                output_table <- output_table %>% 
-                        bind_cols(row_index_tbl %>% count(!!!rows_syms) %>% select(-n), .) %>%
-                        arrange(!!!rows_syms)
+                output_table <- map(.x = stats, .f = loop_through_stat_wo_col) %>%
+                        compact() %>% reduce(.x = ., .f = left_join, by = rows)
         }
         
         
@@ -1537,9 +1690,9 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         current_output_col_var <- .x
                         
                         # call loop_through_stat function
-                        col_var_output <- map_dfc(.x = stats, 
-                                                  .f = ~ loop_through_stat(current_output_col_var = current_output_col_var, .x))
-                        return(col_var_output)
+                        return(map(.x = stats, 
+                                .f = ~ loop_through_stat(current_output_col_var = current_output_col_var, .x)) %>%
+                                       reduce(left_join, by = rows))
                 }
                 
                 # create loop_through_stat function
@@ -1549,35 +1702,59 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         current_stat <- .x
                         
                         # if current_stat = n or pct (which cannot have stat_vars),
-                        # then just fetch and return current_output_col_var from n/pct_output_table
-                        if(current_stat %in% c("n", "pct", "valid_pct")) {
+                        # then just fetch and return current_output_col_var from n/pct/valid_pct_output_table
+                        if(current_stat %in% c("n", "pct_col", "pct_row", "pct_all",
+                                               "valid_pct_col", "valid_pct_row", "valid_pct_all")) {
                                 
                                 # modify current_output_col_var to includ current_stat
                                 current_output_col_var <- str_c(current_output_col_var, "__", current_stat)
                                 
                                 # get current_output_col_var_sym
-                                current_output_col_var_sym <- ensym(current_output_col_var)
+                                current_output_col_var_sym <- sym(current_output_col_var)
                                 
                                 # get current_output_col_var from current_stat output_table
                                 if(current_stat == "n") {
-                                        current_output <- n_output_table %>% select(!!current_output_col_var_sym)
+                                        current_output <- n_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
                                         return(current_output)
                                 }
-                                if(current_stat == "pct") {
-                                        current_output <- pct_output_table %>% select(!!current_output_col_var_sym)
+                                if(current_stat == "pct_col") {
+                                        current_output <- pct_col_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
                                         return(current_output)                
                                 }
-                                if(current_stat == "valid_pct") {
-                                        current_output <- valid_pct_output_table %>% 
-                                                select(!!current_output_col_var_sym)
+                                if(current_stat == "pct_row") {
+                                        current_output <- pct_row_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
+                                        return(current_output)                
+                                }
+                                if(current_stat == "pct_all") {
+                                        current_output <- pct_all_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
+                                        return(current_output)                
+                                }
+                                if(current_stat == "valid_pct_col") {
+                                        current_output <- valid_pct_col_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
+                                        return(current_output)                
+                                }
+                                if(current_stat == "valid_pct_row") {
+                                        current_output <- valid_pct_row_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
+                                        return(current_output)                
+                                }
+                                if(current_stat == "valid_pct_all") {
+                                        current_output <- valid_pct_all_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
                                         return(current_output)                
                                 }
                         }
                         
                         # if current_stat != n, pct, or valid_pct, then need to loop through stat_vars
-                        map_dfc(.x = stat_vars, 
+                        return(map(.x = stat_vars, 
                                 .f = ~ loop_through_stat_vars(current_output_col_var = current_output_col_var,
-                                                              current_stat = current_stat, .x))
+                                                              current_stat = current_stat, .x)) %>%
+                                       compact() %>% reduce(left_join, by = rows))
                 }
                 
                 # create loop_through_stat_vars function
@@ -1587,36 +1764,38 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         current_stat_var <- .x
                         
                         # modify current_output_col_var to include current_stat_var, 
-                        # unless current_stat = "quantiles", which needs special handling due to naming (eg q25)
-                        if(current_stat != "quantiles") {
+                        # unless current_stat = "quantile", which needs special handling due to naming (eg q25)
+                        if(current_stat != "quantile") {
                                 current_output_col_var <- str_c(current_output_col_var, "__", current_stat,
                                                                 ".", current_stat_var)
                         }
                         
-                        # get current_output_col_var_sym - not used to pull quantiles variables though
-                        current_output_col_var_sym <- ensym(current_output_col_var)
+                        # get current_output_col_var_sym - not used to pull quantile variables though
+                        current_output_col_var_sym <- sym(current_output_col_var)
                         
-                        # handle quantiles variables
-                        if(current_stat == "quantiles") {
+                        # handle quantile variables
+                        if(current_stat == "quantile") {
                                 current_output_col_vars <- tibble(current_output_col_var = current_output_col_var,
-                                                                  quantiles = str_c("q", round(quantiles, digits = 2) * 100, ".", current_stat_var)) %>%
+                                                                  quantile = str_c("q", round(quantile, digits = 2) * 100, ".", current_stat_var)) %>%
                                         mutate(current_output_col_var = str_c(current_output_col_var,
-                                                                              quantiles, sep = "__")) %>%
+                                                                              quantile, sep = "__")) %>%
                                         pull(current_output_col_var)
                                 
-                                # get current_output_col_vars_syms - used to pull quantiles variables
+                                # get current_output_col_vars_syms - used to pull quantile variables
                                 current_output_col_vars_syms <- syms(current_output_col_vars)
                         }
                         
                         # get current_output_col_var from current_stat output_table 
                         # for any stat_vars, regardless of whether it's character or numeric
                         if(current_stat == "n_distinct") {
-                                current_output <- n_distinct_output_table %>% select(!!current_output_col_var_sym)
+                                current_output <- n_distinct_output_table %>% 
+                                        select(!!!rows_syms, !!current_output_col_var_sym)
                                 return(current_output)
                         }
                         
                         if(current_stat == "mode") {
-                                current_output <- mode_output_table %>% select(!!current_output_col_var_sym)
+                                current_output <- mode_output_table %>% 
+                                        select(!!!rows_syms, !!current_output_col_var_sym)
                                 return(current_output)
                         }
                         
@@ -1626,40 +1805,48 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
                         # and this will throw error "<output_col_var> not found"
                         if(current_stat_var %in% stat_vars_numeric) {
                                 
+                                if(current_stat == "sum") {
+                                        current_output <- sum_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
+                                        return(current_output)
+                                }
                                 if(current_stat == "mean") {
-                                        current_output <- mean_output_table %>% select(!!current_output_col_var_sym)
+                                        current_output <- mean_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
                                         return(current_output)
                                 }
                                 if(current_stat == "median") {
-                                        current_output <- median_output_table %>% select(!!current_output_col_var_sym)
+                                        current_output <- median_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
                                         return(current_output)
                                 }
                                 
                                 if(current_stat == "sd") {
-                                        current_output <- sd_output_table %>% select(!!current_output_col_var_sym)
+                                        current_output <- sd_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
                                         return(current_output)
                                 }
                                 if(current_stat == "min") {
-                                        current_output <- min_output_table %>% select(!!current_output_col_var_sym)
+                                        current_output <- min_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
                                         return(current_output)
                                 }
                                 if(current_stat == "max") {
-                                        current_output <- max_output_table %>% select(!!current_output_col_var_sym)
+                                        current_output <- max_output_table %>% 
+                                                select(!!!rows_syms, !!current_output_col_var_sym)
                                         return(current_output)
                                 }
-                                if(current_stat == "quantiles") {
-                                        current_output <- quantiles_output_table %>% 
-                                                select(!!!current_output_col_vars_syms)
+                                if(current_stat == "quantile") {
+                                        current_output <- quantile_output_table %>% 
+                                                select(!!!rows_syms, !!!current_output_col_vars_syms)
                                         return(current_output)
                                 }
                         }
                 }
                 
                 # create output_table, minus the row_index_tbl which will be added later below
-                output_table <- map_dfc(.x = collapsed_output_col_vars, .f = loop_through_col_vars) 
-                
-                # add row_index to output_table
-                output_table <- output_table %>% bind_cols(row_index_tbl, .)
+                output_table <- map(.x = collapsed_output_col_vars, .f = loop_through_col_vars)  %>%
+                        reduce(left_join, by = rows)
         }        
         
         
@@ -1669,30 +1856,41 @@ tabler <- function(data, rows, cols = NULL, stats = NULL, stat_vars = NULL,
         
         # add attributes to facilitate tabler helper functions
         
-        # # add rows and cols as attributes
-        # attr(x = output_table, which = "tabler_rows") <- rows
-        # attr(x = output_table, which = "tabler_cols") <- cols
-        # 
-        # # add stats as attributes
-        # attr(x = output_table, which = "tabler_stats") <- stats
-        # 
-        # # add stat_vars as attributes
-        # attr(x = output_table, which = "tabler_stat_vars") <- stat_vars
-        
-        
-        # update col_var_tbl and add as attribute
-        
-        # add stat_vars to col_var_tbl, since all of the stat_vars must be used at least once (unless dropped via specify_stat_combos)
-        col_var_tbl2 <- map_dfr(.x = stat_vars, .f = ~ col_var_tbl %>% mutate(stat_vars = .x)) 
-        mean_col_var_tbl <- tibble(col_vars = mean_output_table %>% select(-c(!!!syms(rows))) %>% names()) %>% 
-                mutate(stat = "mean", stat_vars = str_extract(string = col_vars, pattern = regex("__.*\\.*$")),
-                       stat_vars = str_replace(string = stat_vars, pattern = regex("__.*\\."), replacement = ""))
-        # col_var_tbl2 %>% 
-                
-        attr(x = output_table, which = "tabler_col_var_tbl") <- col_var_tbl
+        # add rows and cols as attributes
+        attr(x = output_table, which = "tabler_rows") <- rows
+        attr(x = output_table, which = "tabler_cols") <- cols
         
         # add row_var_tbl as attribute
         attr(x = output_table, which = "tabler_row_var_tbl") <- row_var_tbl
+        
+        # if cols_present = TRUE, update col_var_tbl to include stats and stat_vars and add as attribute
+        if(cols_present == TRUE) {
+                
+                col_var_tbl <- output_table %>% select(-c(!!!rows_syms)) %>% names() %>% 
+                        tibble(final_output_col_vars = .) %>%
+                        mutate(stats = str_extract(string = final_output_col_vars, pattern = regex("__(?!.*__).*$")),
+                               stat_vars = str_replace(string = stats, pattern = regex("__.*\\."), replacement = ""),
+                               stats = str_replace(string = stats, pattern = "__", replacement = ""),
+                               stats = str_replace(string = stats, pattern = regex("\\..*"), replacement = ""),
+                               stat_vars = case_when(stat_vars %in% c("__n", "__pct", "__valid_pct") ~ NA_character_,
+                                                     TRUE ~ stat_vars),
+                               combined_output_col_vars = str_extract(string = final_output_col_vars, pattern = regex("^.*__")),
+                               combined_output_col_vars = str_replace(string = combined_output_col_vars, 
+                                                                      pattern = "__", replacement = "")) %>%
+                        left_join(., col_var_tbl, by = "combined_output_col_vars") %>%
+                        select(!!!cols_syms, starts_with("output_col_"), combined_output_col_vars,
+                               stats, stat_vars, final_output_col_vars)
+                
+                # add tabler_col_var_tbl attribute
+                attr(x = output_table, which = "tabler_col_var_tbl") <- col_var_tbl
+        }
+        
+        # if cols_present = FALSE, add NA as tabler_col_var_tbl attribute
+        if(cols_present == FALSE) {
+                attr(x = output_table, which = "tabler_col_var_tbl") <- NA
+        }
+        
+        
 
 
         #################################################################################################
