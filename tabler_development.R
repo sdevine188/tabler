@@ -11,6 +11,15 @@ library(gapminder)
 # https://juba.github.io/questionr/reference/index.html has cross.multi.table()
 
 
+#################################################################################
+
+
+# load tabler()
+setwd("C:/Users/Stephen/Desktop/R/tabler")
+source("tabler.R")
+source("tabler_helper_functions/add_dummies.R")
+
+
 ###################################################################################
 
 
@@ -33,17 +42,10 @@ data_original <- gapminder %>% mutate(life_exp = case_when(lifeExp < 30 ~ "short
         filter(country != "Cote d'Ivoire") %>%
         mutate(row_number = row_number(), 
                continent = case_when(row_number == 1 ~ NA_character_, TRUE ~ continent),
-               size = case_when(row_number == 2 ~ NA_character_, TRUE ~ size))
+               size = case_when(row_number == 2 ~ NA_character_, TRUE ~ size)) %>%
+        add_dummies(sport)
 
 data_original %>% glimpse()
-
-
-#################################################################################
-
-
-# load tabler()
-setwd("C:/Users/Stephen/Desktop/R/tabler")
-source("tabler.R")
 
 
 #############################################################################################
@@ -55,7 +57,8 @@ rows <- vars(continent, era)
 # rows <- "continent"
 # cols <- NULL
 # cols <- c("size", "life_exp")
-cols <- vars(size, life_exp)
+# cols <- vars(size, life_exp)
+cols <- vars(size, sport.soccer)
 # weights <- "weights"
 weights <- NULL
 stats <- c("n", "pct_col", "pct_row", "pct_all", "valid_pct_col", "valid_pct_row", "valid_pct_all", 
@@ -65,19 +68,21 @@ stats <- c("n", "pct_col", "pct_row", "pct_all", "valid_pct_col", "valid_pct_row
 # stat_vars <- NULL
 stat_vars <- c("pop", "country", "sport", "gdpPercap")
 # stat_vars <- c("country", "year")
-pct_type <- "row"
-n_quantiles <- NULL
 # quantiles <- c(0, .25, .5, .75, 1)
 quantile <- c(.25, .5, .75, 1)
 normalize_weights <- FALSE
+na.rm <- TRUE
+na.rm_true_stats <- NULL
+na.rm_false_stats <- "mean"
 
 data <- data_original
 # data <- data %>% mutate(weights = sample(x = seq(from = 1, to = 3, by = .1), size = nrow(data), replace = TRUE))
 glimpse(data)
 
-tabler_output <- data %>% tabler(rows = rows, cols = cols, weights = weights, stats = stats, 
-                                 stat_vars = stat_vars, quantile = quantile, 
-                                 normalize_weights = normalize_weights) 
+tabler_output <- data %>% tabler(rows = rows, cols = cols, stats = stats, 
+                                 stat_vars = stat_vars, quantile = quantile, na.rm = na.rm, 
+                                 na.rm_true_stats = na.rm_true_stats, na.rm_false_stats = na.rm_false_stats,
+                                 weights = weights, normalize_weights = normalize_weights) 
 tabler_output %>% dim()
 tabler_output %>% glimpse()
 tabler_output %>% attributes()
@@ -93,6 +98,7 @@ data %>% tabler(rows = continent, cols = size, weights = weights, stats = stats,
 
 
 # next steps
+# then use add_dummies on gapminder data, and test implementation of tabler_rows/cols attributes w dummy flags
 
 
 ##############
@@ -100,34 +106,27 @@ data %>% tabler(rows = continent, cols = size, weights = weights, stats = stats,
 
 # prioritized feature list
 
-# add global na.rm argument, w default FALSE like in base R - decision to toss data needs to be made by human
-# add global args na.rm_true/false_stats taking strings to allow for modifying global na.rm arg 
-# add a dummy_var_tbl to attributes, so drop_neg_dummies can identify 1/0 dummies (don't include TRUE/FALSE etc)
+# add a dummy_var_tbl to attributes
 # complete tabler_tests
 # add specify_stat_combos argument 
-
 # allow stacking multiple row/col groups crossed against each other
 
-# add_dummy_vars standalone function (specify vars, converts to format var.value)
-# drop_neg_dummy_vars standalone function 
-        # (use stored attributes, can drop all, only row/cols, or can also specify vars)
-        # will throw warning about not summing to 1 if row/col dummy is dropped, and stats includes pct/total 
+# drop_neg_dummies standalone function 
+        # takes a vars arg with tidyselect helpers
+        # takes a row/col_groups arg
+        # has update_stats arg to specify which stats to update from among totals, pcts, and cumsum
+        # e.g. retained cols are asia.1_x_sport.soccer__pct_row and asia.1_x_sport.basketball__pct_row w/ age group row
+        # with asia.0_x_sport.soccer__pct_row and asia.0_x_sport.basketball__pct_row negative dummies being dropped
+        # do you want asia.1_x_sport.soccer__pct_row/total to remain focused on whole population perspective, or just asia?
 # select_rows/cols(); seperate functions for clarity/symmetry; 
         # select by single/multi strings in c(), single bare in c(), single/multi string/bare in vars()
         # full tidyselect helper support in vars()
-        # note any rows specified are returned for all row/col_groups to avoid breaking rectangular shape 
+        # has stats arg defaulting to NULL (includes "totals")
+        # has stat_vars arg defaulting to NULL, w/ tidyselect support (negation is supported for string/bare/vars)
+        # has row/col_groups arg defaulting to NULL; (eg groups = 1, groups = c(1, 2), groups = 1:3, groups = c(1, 3:4))
+        # note any rows/cols specified are returned for all row/col_groups to avoid breaking rectangular shape 
         # will throw warning about not summing to 1 or transparently if part of pct/total row/col vars omitted 
-# select_stats(); specify stats 
-        # pass as string or c(); negation is supported by passing values arg to deparse/sub
-        # totals are a stat
-        # will throw warning about not summing transparently if part of totals row omitted 
-# select_stat_vars(); specify vars 
-        # select by single/multi strings in c(), single bare in c(), single/multi string/bare in vars()
-        # full tidyselect helper support in vars()
-        # negation is supported (for string/bare var use deparse/sub, or negate inside vars())
-        # will throw warning about not summing transparently if pct_row/total/cumsum involved
-# select_row_groups(); (eg groups = 1, groups = c(1, 2), groups = 1:3, groups = c(1, 3:4))
-# select_col_groups(); (eg groups = 1, groups = c(1, 2), groups = 1:3, groups = c(1, 3:4))
+        # has update_stats arg to specify which stats to update from among totals, pcts, and cumsum
 # select_na(); takes "from" arg with default value c("rows", "cols");
 # drop_na(); takes "from" arg with default value c("rows", "cols")
         # will throw warning about not summing transparently if pct_row/total/cumsum involved
@@ -138,18 +137,25 @@ data %>% tabler(rows = continent, cols = size, weights = weights, stats = stats,
 # format_dollar() specify vars; call repeatedly; default to all numeric vars; wrap mutate_at and scales
 # format_pct(), specify vars; call repeatedly; default to all numeric vars; wrap mutate_at and as_percent
 # format_round(), specify vars; call repeatedly; default to all numeric vars; wrap mutate_at and scales
-# add_stats_total_row/col standalone functions (can total any stat, even if it's weird like sd)
+# add_stats_total standalone functions (can total any stat, even if it's weird like sd)
+        # eg var.value_x_var.value__stat.stat_vars__total, var.value_x_var.value__stat.stat_vars__cumsum
         # it only makes sense to pass stats args (and the across_groups arg)
-        # for multiple row/col groups, totals can recognize row/col groups by attribute tbls
-        # the total row/cols can then be added as "totals_row/col_group_1" etc and inserted after row/col
-        # or if the argument is passed for across_groups = TRUE, a single "totals_row/col_all_groups" can be added
-# add_stats_cumsum_col; takes same target_cols, stats, stat_vars, col_group args as specify_stat_combos
+        # for multiple col groups, totals can recognize col groups by attribute tbls
+        # the total cols can then be added as "total_col_group_1" etc and inserted after col
+        # or if the argument is passed for across_groups = TRUE, a single "total_all_col_groups" can be added
+# add_stats_cumsum; takes same target_cols, stats, stat_vars, col_group args as specify_stat_combos
         # cumsum should be done after tabler because it gives chance to drop/reorder rows w/o messing up cumsum
+# add_row_total
+        # it only makes sense to pass stats args (and the across_groups arg)
+        # for multiple row groups, totals can recognize row groups by attribute tbls
+        # the total row can then be added as "total_row_group_1" etc and inserted after row
+        # or if the argument is passed for across_groups = TRUE, a single "total_all_row_groups" can be added
 # reorder_rows/cols; order stat_cols based on vars, stats, stat_vars, groups, or specify_vars for full control
         # has across_groups = FALSE default arg
         # reorder_cols can pass multiple criteria; eg by = c("groups", desc("stat_vars"), "stats", "vars")
         # reorder_rows can only take by = "vars" or "groups"
         # will flag warning if reorder_rows called when stat_cumsum_col is present
+        # has update_stats arg to specify which stats to update from among totals, pcts, and cumsum (cumsum only concern)
 # simplify_col/row_names, drops/adds preceding var., and returns just value__stat.stat_var 
         # (only valid for use on row if row var_names are collapsed and tabler_row is present)
         # this should be run last, since row/col names are no longer recognizable to tabler functions

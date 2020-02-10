@@ -1,6 +1,6 @@
 library(Hmisc)
-library(dplyr)
 library(tidyverse)
+library(tidyselect)
 library(testthat)
 library(attempt)
 library(rlang)
@@ -13,6 +13,7 @@ library(rlang)
 # create tabler function
 tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_vars = NULL, 
                    quantile = c(0, .25, .5, .75, 1), 
+                   na.rm = FALSE, na.rm_true_stats = NULL, na.rm_false_stats = NULL,
                    weights = NULL, normalize_weights = TRUE) {
         
         
@@ -52,7 +53,7 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
         if("quosure" %in% class(rows) | "quosures" %in% class(rows)) {
                 
                 # handle bare variables passed to vars() that are not found in data
-                try_catch(expr = rows_placeholder <- data %>% select(!!!rows) %>% names(), .e = function(e) {
+                try_catch(expr = rows_placeholder <- data %>% ungroup() %>% select(!!!rows) %>% names(), .e = function(e) {
                         
                         if(str_detect(string = as.character(e), 
                                       pattern = regex("object .* not found\n"))) {
@@ -305,6 +306,49 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                 stop("The normalize_weights argument must be either TRUE or FALSE (default).")
         }
         
+        if(!(is.null(na.rm_true_stats)) | !(is.null(na.rm_false_stats))) {
+                
+                na.rm_stats_not_in_stats_arg <- tibble(na.rm_stats = c(na.rm_true_stats, na.rm_false_stats)) %>%
+                        anti_join(., tibble(stats = stats), by = c("na.rm_stats" = "stats")) %>% 
+                        pull(na.rm_stats)
+                
+                if(length(na.rm_stats_not_in_stats_arg) > 0) {
+                        stop(str_glue("The following stats were passed to the na.rm_true_stats or ",
+                                        "na.rm_false_stats arguments, but were not also passed to the ",
+                                      "stats argument, which is required: ",
+                                      "{str_c(na.rm_stats_not_in_stats_arg, collapse = ', ')}"))
+                }
+        }
+        
+        if(!(is.null(na.rm_true_stats)) & !(is.null(na.rm_false_stats))) {
+                
+                stats_passed_to_both_na.rm_args <- tibble(na.rm_true_stats = na.rm_true_stats) %>%
+                        inner_join(., tibble(na.rm_false_stats = na.rm_false_stats),
+                                   by = c("na.rm_true_stats" = "na.rm_false_stats")) %>% 
+                        pull(na.rm_true_stats)
+                
+                if(length(stats_passed_to_both_na.rm_args) > 0) {
+                        stop(str_glue("The following stats were passed to both the na.rm_true_stats ",
+                                      "argument and the na.rm_false_stats argument, which is invalid: ",
+                                      "{str_c(stats_passed_to_both_na.rm_args, collapse = ', ')}"))
+                }
+        }
+        
+        if(!(is.null(na.rm_true_stats)) | !(is.null(na.rm_false_stats))) {
+                
+                stats_passed_but_not_taking_na.rm_arg <- tibble(na.rm_stats = c(na.rm_true_stats, na.rm_false_stats)) %>%
+                        inner_join(., tibble(stats = c("n", "pct_col", "pct_row", "pct_all",
+                  "valid_pct_col", "valid_pct_row", "valid_pct_all")), by = c("na.rm_stats" = "stats")) %>% 
+                        pull(na.rm_stats)
+                
+                if(length(stats_passed_but_not_taking_na.rm_arg) > 0) {
+                        stop(str_glue("The following stats were passed to the na.rm_true_stats or ",
+                                      "na.rm_false_stats arguments, but are invalid since they do ",
+                                      "not require an na.rm argument: ",
+                                      "{str_c(stats_passed_but_not_taking_na.rm_arg, collapse = ', ')}"))
+                }
+        }
+        
         
         ################################################################################################
         
@@ -401,7 +445,7 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                 
                 # select output_
                 current_output_var <- current_n_output_table %>% 
-                        select(!!!rows_syms, !!!cols_syms, current_output_var)
+                        select(!!!rows_syms, !!!cols_syms, !!sym(current_output_var))
                 return(current_output_var)
         }
         
@@ -923,13 +967,23 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                 # get current_stat_var_sym 
                 current_stat_var_sym <- sym(current_stat_var)
                 
+                # get n_distinct_na.rm
+                if("n_distinct" %in% na.rm_true_stats) {
+                        n_distinct_na.rm <- TRUE
+                } else if("n_distinct" %in% na.rm_false_stats) {
+                        n_distinct_na.rm <- FALSE
+                } else {
+                        n_distinct_na.rm <- na.rm
+                }
+                
                 # get n_distinct_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
                         
                         # get n_distinct_output_table
                         n_distinct_output_table <- data %>% group_by(!!!rows_syms) %>% 
                                 distinct(!!current_stat_var_sym) %>%
-                                count(!!!rows_syms) %>% ungroup()
+                                dplyr::summarize(n = n_distinct(!!current_stat_var_sym, 
+                                                               na.rm = n_distinct_na.rm)) %>% ungroup()
 
                         # rename stat
                         names(n_distinct_output_table) <- c(rows, str_c("n_distinct.", current_stat_var))
@@ -941,7 +995,8 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                         # get n_distinct_output_table
                         n_distinct_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms) %>% 
                                 distinct(!!current_stat_var_sym) %>%
-                                count(!!!rows_syms, !!!cols_syms) %>% ungroup() %>% 
+                                dplyr::summarize(n = n_distinct(!!current_stat_var_sym, 
+                                                               na.rm = n_distinct_na.rm)) %>% ungroup() %>% 
                                 unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
                                 left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
                                           by = "row_index_key") %>%
@@ -977,6 +1032,15 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                 # get current_stat_var_sym 
                 current_stat_var_sym <- sym(current_stat_var)
                 
+                # get mode_na.rm
+                if("mode" %in% na.rm_true_stats) {
+                        mode_na.rm <- TRUE
+                } else if("mode" %in% na.rm_false_stats) {
+                        mode_na.rm <- FALSE
+                } else {
+                        mode_na.rm <- na.rm
+                }
+                
                 # get mode_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
                         
@@ -985,13 +1049,29 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                                 
                                 # note that ties for most frequent are broken 
                                 # by taking first alphabetical/lowest value of current_stat_var
-                                mode_output_table <- data %>% group_by(!!!rows_syms) %>%
-                                        count(!!current_stat_var_sym) %>%
-                                        group_by(!!!rows_syms) %>%
-                                        arrange(desc(n), !!current_stat_var_sym) %>% 
-                                        slice(1) %>%
-                                        ungroup() %>% select(-n) %>% 
-                                        rename(mode := !!current_stat_var)
+                                
+                                if(mode_na.rm == TRUE) {
+                                        
+                                        mode_output_table <- data %>% group_by(!!!rows_syms) %>%
+                                                count(!!current_stat_var_sym) %>%
+                                                filter(!(is.na(!!current_stat_var_sym))) %>%
+                                                group_by(!!!rows_syms) %>%
+                                                arrange(desc(n), !!current_stat_var_sym) %>% 
+                                                slice(1) %>%
+                                                ungroup() %>% select(-n) %>% 
+                                                rename(mode := !!current_stat_var)
+                                }
+                                
+                                if(mode_na.rm == FALSE) {
+                                        
+                                        mode_output_table <- data %>% group_by(!!!rows_syms) %>%
+                                                count(!!current_stat_var_sym) %>%
+                                                group_by(!!!rows_syms) %>%
+                                                arrange(desc(n), !!current_stat_var_sym) %>% 
+                                                slice(1) %>%
+                                                ungroup() %>% select(-n) %>% 
+                                                rename(mode := !!current_stat_var)
+                                }
                         }
                         
                         # get mode_output_table, if normalize_weights = FALSE
@@ -1000,19 +1080,41 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                                 
                                 # note that ties for most frequent are broken 
                                 # by taking first alphabetical/lowest value of current_stat_var
-                                mode_output_table <- data %>% group_by(!!!rows_syms, weights) %>%
-                                        count(!!current_stat_var_sym) %>%
-                                        ungroup() %>%
-                                        mutate(n = n * weights) %>%
-                                        # need to sum to account for different weight values
-                                        # leading to multiple row per row/stat_var combos
-                                        group_by(!!!rows_syms, !!current_stat_var_sym) %>%
-                                        dplyr::summarize(n = sum(n, na.rm = TRUE)) %>% ungroup() %>%
-                                        group_by(!!!rows_syms) %>%
-                                        arrange(desc(n), !!current_stat_var_sym) %>% 
-                                        slice(1) %>%
-                                        ungroup() %>% select(-n) %>% 
-                                        rename(mode := !!current_stat_var)
+                                
+                                if(mode_na.rm == TRUE) {
+                                        
+                                        mode_output_table <- data %>% group_by(!!!rows_syms, weights) %>%
+                                                count(!!current_stat_var_sym) %>%
+                                                ungroup() %>%
+                                                mutate(n = n * weights) %>%
+                                                # need to sum to account for different weight values
+                                                # leading to multiple row per row/stat_var combos
+                                                group_by(!!!rows_syms, !!current_stat_var_sym) %>%
+                                                dplyr::summarize(n = sum(n, na.rm = TRUE)) %>% ungroup() %>%
+                                                group_by(!!!rows_syms) %>%
+                                                arrange(desc(n), !!current_stat_var_sym) %>% 
+                                                filter(!(is.na(!!current_stat_var_sym))) %>%
+                                                slice(1) %>%
+                                                ungroup() %>% select(-n) %>% 
+                                                rename(mode := !!current_stat_var)
+                                }
+
+                                if(mode_na.rm == FALSE) {
+                                        
+                                        mode_output_table <- data %>% group_by(!!!rows_syms, weights) %>%
+                                                count(!!current_stat_var_sym) %>%
+                                                ungroup() %>%
+                                                mutate(n = n * weights) %>%
+                                                # need to sum to account for different weight values
+                                                # leading to multiple row per row/stat_var combos
+                                                group_by(!!!rows_syms, !!current_stat_var_sym) %>%
+                                                dplyr::summarize(n = sum(n, na.rm = TRUE)) %>% ungroup() %>%
+                                                group_by(!!!rows_syms) %>%
+                                                arrange(desc(n), !!current_stat_var_sym) %>% 
+                                                slice(1) %>%
+                                                ungroup() %>% select(-n) %>% 
+                                                rename(mode := !!current_stat_var)
+                                }
                         }
                         
                         
@@ -1036,21 +1138,42 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                                 
                                 # note that ties for most frequent are broken 
                                 # by taking first alphabetical/lowest value of current_stat_var
-                                mode_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms) %>%
-                                        count(!!current_stat_var_sym) %>% 
-                                        group_by(!!!rows_syms, !!!cols_syms) %>%
-                                        arrange(desc(n), !!current_stat_var_sym) %>% slice(1) %>%
-                                        ungroup() %>% 
-                                        unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
-                                        left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
-                                                  by = "row_index_key") %>%
-                                        arrange(row_index_tbl_row_number) %>% 
-                                        select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
-                                        unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
-                                        rename(mode := !!current_stat_var_sym) %>%
-                                        mutate(col_vars = str_c(col_vars, "__mode", ".", current_stat_var)) %>%
-                                        select(-n) %>%
-                                        spread(key = col_vars, value = mode) 
+                                if(mode_na.rm == TRUE) {
+                                        
+                                        mode_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms) %>%
+                                                count(!!current_stat_var_sym) %>% 
+                                                arrange(desc(n), !!current_stat_var_sym) %>% 
+                                                filter(!(is.na(!!current_stat_var_sym))) %>% slice(1) %>%
+                                                ungroup() %>% 
+                                                unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
+                                                left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
+                                                          by = "row_index_key") %>%
+                                                arrange(row_index_tbl_row_number) %>% 
+                                                select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
+                                                unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
+                                                rename(mode := !!current_stat_var_sym) %>%
+                                                mutate(col_vars = str_c(col_vars, "__mode", ".", current_stat_var)) %>%
+                                                select(-n) %>%
+                                                spread(key = col_vars, value = mode)
+                                }
+                                 
+                                if(mode_na.rm == FALSE) {
+                                        
+                                        mode_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms) %>%
+                                                count(!!current_stat_var_sym) %>% 
+                                                arrange(desc(n), !!current_stat_var_sym) %>% slice(1) %>%
+                                                ungroup() %>% 
+                                                unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
+                                                left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
+                                                          by = "row_index_key") %>%
+                                                arrange(row_index_tbl_row_number) %>% 
+                                                select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
+                                                unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
+                                                rename(mode := !!current_stat_var_sym) %>%
+                                                mutate(col_vars = str_c(col_vars, "__mode", ".", current_stat_var)) %>%
+                                                select(-n) %>%
+                                                spread(key = col_vars, value = mode)
+                                }
                         }
                         
                         # get mode_output_table, if normalize_weights = FALSE
@@ -1059,26 +1182,54 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                                 
                                 # note that ties for most frequent are broken 
                                 # by taking first alphabetical/lowest value of current_stat_var
-                                mode_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms, weights) %>%
-                                        count(!!current_stat_var_sym) %>% 
-                                        mutate(n = n * weights) %>%
-                                        ungroup() %>% 
-                                        # need to sum to account for different weight values
-                                        # leading to multiple row per row/stat_var combos
-                                        group_by(!!!rows_syms, !!!cols_syms, !!current_stat_var_sym) %>%
-                                        dplyr::summarize(n = sum(n, na.rm = TRUE)) %>% ungroup() %>%
-                                        group_by(!!!rows_syms, !!!cols_syms) %>%
-                                        arrange(desc(n), !!current_stat_var_sym) %>% slice(1) %>%
-                                        ungroup() %>% select(-n) %>%
-                                        unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
-                                        left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)),
-                                                  by = "row_index_key") %>%
-                                        arrange(row_index_tbl_row_number) %>%
-                                        select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
-                                        unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
-                                        rename(mode := !!current_stat_var_sym) %>%
-                                        mutate(col_vars = str_c(col_vars, "__mode", ".", current_stat_var)) %>%
-                                        spread(key = col_vars, value = mode)
+                                if(mode_na.rm == TRUE) {
+                                        
+                                        mode_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms, weights) %>%
+                                                count(!!current_stat_var_sym) %>% 
+                                                mutate(n = n * weights) %>%
+                                                ungroup() %>% 
+                                                # need to sum to account for different weight values
+                                                # leading to multiple row per row/stat_var combos
+                                                group_by(!!!rows_syms, !!!cols_syms, !!current_stat_var_sym) %>%
+                                                dplyr::summarize(n = sum(n, na.rm = TRUE)) %>% ungroup() %>%
+                                                group_by(!!!rows_syms, !!!cols_syms) %>%
+                                                arrange(desc(n), !!current_stat_var_sym) %>% 
+                                                filter(!(is.na(!!current_stat_var_sym))) %>% slice(1) %>%
+                                                ungroup() %>% select(-n) %>%
+                                                unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
+                                                left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)),
+                                                          by = "row_index_key") %>%
+                                                arrange(row_index_tbl_row_number) %>%
+                                                select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
+                                                unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
+                                                rename(mode := !!current_stat_var_sym) %>%
+                                                mutate(col_vars = str_c(col_vars, "__mode", ".", current_stat_var)) %>%
+                                                spread(key = col_vars, value = mode)
+                                }
+                
+                                if(mode_na.rm == FALSE) {
+                                        
+                                        mode_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms, weights) %>%
+                                                count(!!current_stat_var_sym) %>% 
+                                                mutate(n = n * weights) %>%
+                                                ungroup() %>% 
+                                                # need to sum to account for different weight values
+                                                # leading to multiple row per row/stat_var combos
+                                                group_by(!!!rows_syms, !!!cols_syms, !!current_stat_var_sym) %>%
+                                                dplyr::summarize(n = sum(n, na.rm = TRUE)) %>% ungroup() %>%
+                                                group_by(!!!rows_syms, !!!cols_syms) %>%
+                                                arrange(desc(n), !!current_stat_var_sym) %>% slice(1) %>%
+                                                ungroup() %>% select(-n) %>%
+                                                unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
+                                                left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)),
+                                                          by = "row_index_key") %>%
+                                                arrange(row_index_tbl_row_number) %>%
+                                                select(-c(row_index_key, row_index_tbl_row_number, !!!cols_syms)) %>%
+                                                unite(col = col_vars, starts_with("output_col"), sep = "_x_") %>%
+                                                rename(mode := !!current_stat_var_sym) %>%
+                                                mutate(col_vars = str_c(col_vars, "__mode", ".", current_stat_var)) %>%
+                                                spread(key = col_vars, value = mode)
+                                }
                         }
                         
                         return(mode_output_table)
@@ -1106,13 +1257,23 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
 
                 # get current_stat_var_sym
                 current_stat_var_sym <- sym(current_stat_var)
+                
+                # get sum_na.rm
+                if("sum" %in% na.rm_true_stats) {
+                        sum_na.rm <- TRUE
+                } else if("sum" %in% na.rm_false_stats) {
+                        sum_na.rm <- FALSE
+                } else {
+                        sum_na.rm <- na.rm
+                }
 
                 # get sum_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
 
                         # get sum_output_table
                         sum_output_table <- data %>% group_by(!!!rows_syms) %>%
-                                dplyr::summarize(sum = sum(!!current_stat_var_sym * weights)) %>%
+                                dplyr::summarize(sum = sum(!!current_stat_var_sym * weights, 
+                                                           na.rm = sum_na.rm)) %>%
                                 ungroup()
 
 
@@ -1134,7 +1295,8 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                         # get sum_output_table
                         sum_output_table <- data %>%
                                 group_by(!!!rows_syms, !!!cols_syms) %>%
-                                dplyr::summarize(sum = sum(!!current_stat_var_sym * weights)) %>%
+                                dplyr::summarize(sum = sum(!!current_stat_var_sym * weights,
+                                                           na.rm = sum_na.rm)) %>%
                                 ungroup() %>%
                                 unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
                                 left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)),
@@ -1171,13 +1333,23 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                 # get current_stat_var_sym 
                 current_stat_var_sym <- sym(current_stat_var)
                 
+                # get mean_na.rm
+                if("mean" %in% na.rm_true_stats) {
+                        mean_na.rm <- TRUE
+                } else if("mean" %in% na.rm_false_stats) {
+                        mean_na.rm <- FALSE
+                } else {
+                        mean_na.rm <- na.rm
+                }
+                
                 # get mean_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
                         
                         # get mean_output_table
                         mean_output_table <- data %>% group_by(!!!rows_syms) %>% 
                                 dplyr::summarize(mean = wtd.mean(!!current_stat_var_sym, weights = weights, 
-                                                                 normwt = normalize_weights, na.rm = TRUE)) %>% 
+                                                                 normwt = normalize_weights, 
+                                                                 na.rm = mean_na.rm)) %>% 
                                 ungroup()
                         
                         
@@ -1200,7 +1372,8 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                         mean_output_table <- data %>% 
                                 group_by(!!!rows_syms, !!!cols_syms) %>% 
                                 dplyr::summarize(mean = wtd.mean(!!current_stat_var_sym, weights = weights, 
-                                                                 normwt = normalize_weights, na.rm = TRUE)) %>% 
+                                                                 normwt = normalize_weights, 
+                                                                 na.rm = mean_na.rm)) %>% 
                                 ungroup() %>%
                                 unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
                                 left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
@@ -1237,6 +1410,15 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                 # get current_stat_var_sym 
                 current_stat_var_sym <- sym(current_stat_var)
                 
+                # get median_na.rm
+                if("median" %in% na.rm_true_stats) {
+                        median_na.rm <- TRUE
+                } else if("median" %in% na.rm_false_stats) {
+                        median_na.rm <- FALSE
+                } else {
+                        median_na.rm <- na.rm
+                }
+                
                 # get median_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
                         
@@ -1244,7 +1426,8 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                         median_output_table <- data %>% group_by(!!!rows_syms) %>% 
                                 dplyr::summarize(median = list(enframe(wtd.quantile(!!current_stat_var_sym, 
                                                                                     probs = .5, weights = weights, 
-                                                                                    normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                                                                    normwt = normalize_weights, 
+                                                                                    na.rm = median_na.rm)))) %>% 
                                 unnest(cols = median) %>% ungroup() %>% 
                                 mutate(name = str_c("median", ".", current_stat_var)) %>%
                                 spread(key = name, value = value)
@@ -1260,7 +1443,8 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                         median_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms) %>% 
                                 dplyr::summarize(median = list(enframe(wtd.quantile(!!current_stat_var_sym, 
                                                                                     probs = .5, weights = weights, 
-                                                                                    normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                                                                    normwt = normalize_weights, 
+                                                                                    na.rm = median_na.rm)))) %>% 
                                 unnest(cols = median) %>% ungroup() %>% 
                                 mutate(name = "median") %>%
                                 spread(key = name, value = value) %>% 
@@ -1299,6 +1483,15 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                 # get current_stat_var_sym 
                 current_stat_var_sym <- sym(current_stat_var)
                 
+                # get sd_na.rm
+                if("sd" %in% na.rm_true_stats) {
+                        sd_na.rm <- TRUE
+                } else if("sd" %in% na.rm_false_stats) {
+                        sd_na.rm <- FALSE
+                } else {
+                        sd_na.rm <- na.rm
+                }
+                
                 # get sd_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
                         
@@ -1306,7 +1499,8 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                         sd_output_table <- data %>% group_by(!!!rows_syms) %>% 
                                 dplyr::summarize(sd = suppressWarnings(sqrt(wtd.var(!!current_stat_var_sym, 
                                                                                     weights = weights, 
-                                                                                    normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                                                                    normwt = normalize_weights, 
+                                                                                    na.rm = sd_na.rm)))) %>% 
                                 ungroup()
                         
                         
@@ -1330,7 +1524,8 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                                 group_by(!!!rows_syms, !!!cols_syms) %>% 
                                 dplyr::summarize(sd = suppressWarnings(sqrt(wtd.var(!!current_stat_var_sym, 
                                                                                     weights = weights, 
-                                                                                    normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                                                                    normwt = normalize_weights, 
+                                                                                    na.rm = sd_na.rm)))) %>% 
                                 ungroup() %>%
                                 unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
                                 left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
@@ -1368,12 +1563,21 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                 # get current_stat_var_sym 
                 current_stat_var_sym <- sym(current_stat_var)
                 
+                # get min_na.rm
+                if("min" %in% na.rm_true_stats) {
+                        min_na.rm <- TRUE
+                } else if("min" %in% na.rm_false_stats) {
+                        min_na.rm <- FALSE
+                } else {
+                        min_na.rm <- na.rm
+                }
+                
                 # get min_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
                         
                         # get min_output_table
                         min_output_table <- data %>% group_by(!!!rows_syms) %>% 
-                                dplyr::summarize(min = min(!!current_stat_var_sym, na.rm = TRUE)) %>% 
+                                dplyr::summarize(min = min(!!current_stat_var_sym, na.rm = min_na.rm)) %>% 
                                 ungroup()
                         
                         # get current_stat_variable_name
@@ -1394,7 +1598,7 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                         # get min_output_table
                         min_output_table <- data %>% 
                                 group_by(!!!rows_syms, !!!cols_syms) %>% 
-                                dplyr::summarize(min = min(!!current_stat_var_sym, na.rm = TRUE)) %>% 
+                                dplyr::summarize(min = min(!!current_stat_var_sym, na.rm = min_na.rm)) %>% 
                                 ungroup() %>%
                                 unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
                                 left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
@@ -1431,12 +1635,21 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                 # get current_stat_var_sym 
                 current_stat_var_sym <- sym(current_stat_var)
                 
+                # get max_na.rm
+                if("max" %in% na.rm_true_stats) {
+                        max_na.rm <- TRUE
+                } else if("max" %in% na.rm_false_stats) {
+                        max_na.rm <- FALSE
+                } else {
+                        max_na.rm <- na.rm
+                }
+                
                 # get max_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
                         
                         # get max_output_table
                         max_output_table <- data %>% group_by(!!!rows_syms) %>% 
-                                dplyr::summarize(max = max(!!current_stat_var_sym, na.rm = TRUE)) %>% 
+                                dplyr::summarize(max = max(!!current_stat_var_sym, na.rm = max_na.rm)) %>% 
                                 ungroup()
                         
                         # get current_stat_variable_name
@@ -1457,7 +1670,7 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                         # get max_output_table
                         max_output_table <- data %>% 
                                 group_by(!!!rows_syms, !!!cols_syms) %>% 
-                                dplyr::summarize(max = max(!!current_stat_var_sym, na.rm = TRUE)) %>% 
+                                dplyr::summarize(max = max(!!current_stat_var_sym, na.rm = max_na.rm)) %>% 
                                 ungroup() %>%
                                 unite(col = row_index_key, !!!rows_syms, !!!cols_syms, remove = FALSE) %>%
                                 left_join(., row_index_key_tbl %>% select(-c(!!!rows_syms), -c(!!!cols_syms)), 
@@ -1494,6 +1707,15 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                 # get current_stat_var_sym 
                 current_stat_var_sym <- sym(current_stat_var)
                 
+                # get quantile_na.rm
+                if("quantile" %in% na.rm_true_stats) {
+                        quantile_na.rm <- TRUE
+                } else if("quantile" %in% na.rm_false_stats) {
+                        quantile_na.rm <- FALSE
+                } else {
+                        quantile_na.rm <- na.rm
+                }
+                
                 # get quantile_output_table if cols_present = FALSE
                 if(cols_present == FALSE) {
                         
@@ -1504,7 +1726,8 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                         quantile_output_table <- data %>% group_by(!!!rows_syms) %>% 
                                 dplyr::summarize(quantile = list(enframe(wtd.quantile(!!current_stat_var_sym, 
                                                                                        probs = quantile, weights = weights, 
-                                                                                       normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                                                                       normwt = normalize_weights, 
+                                                                                      na.rm = quantile_na.rm)))) %>% 
                                 unnest(cols = quantile) %>% ungroup() %>% 
                                 mutate(name = str_squish(name),
                                        name = str_replace(string = name, pattern = "%", replacement = ""),
@@ -1569,7 +1792,8 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                         quantile_output_table <- data %>% group_by(!!!rows_syms, !!!cols_syms) %>% 
                                 dplyr::summarize(quantile = list(enframe(wtd.quantile(!!current_stat_var_sym, 
                                                                                        probs = quantile, weights = weights, 
-                                                                                       normwt = normalize_weights, na.rm = TRUE)))) %>% 
+                                                                                       normwt = normalize_weights, 
+                                                                                      na.rm = quantile_na.rm)))) %>% 
                                 unnest(cols = quantile) %>% ungroup() %>% 
                                 mutate(name = str_squish(name),
                                        name = str_replace(string = name, pattern = "%", replacement = ""),
@@ -1856,9 +2080,49 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
         
         # add attributes to facilitate tabler helper functions
         
-        # add rows and cols as attributes
-        attr(x = output_table, which = "tabler_rows") <- rows
-        attr(x = output_table, which = "tabler_cols") <- cols
+        # create get_dummy_flags function
+        get_dummy_flags <- function(current_var_values, current_var_name, type = NULL) {
+                
+                distinct_current_var_values <- tibble(current_var_values) %>% 
+                        distinct() %>% arrange() %>% pull()
+                
+                # handle rows
+                if(type == "rows") {
+                        if(identical(distinct_current_var_values, c(0, 1)) | 
+                           identical(distinct_current_var_values, c("0", "1"))) {
+                                return(tibble(rows = current_var_name, dummy_flag = 1))
+                        }
+                        if(!(identical(distinct_current_var_values, c(0, 1))) & 
+                           !(identical(distinct_current_var_values, c("0", "1")))) {
+                                return(tibble(rows = current_var_name, dummy_flag = 0))
+                        }
+                }
+                
+                # handle cols
+                if(type == "cols") {
+                        if(identical(distinct_current_var_values, c(0, 1)) | 
+                           identical(distinct_current_var_values, c("0", "1"))) {
+                                return(tibble(cols = current_var_name, dummy_flag = 1))
+                        }
+                        if(!(identical(distinct_current_var_values, c(0, 1))) & 
+                           !(identical(distinct_current_var_values, c("0", "1")))) {
+                                return(tibble(cols = current_var_name, dummy_flag = 0))
+                        }
+                }
+                
+        }
+        
+        # add tabler_rows as attribute, listing rows and dummy flags
+        tabler_rows <- data %>% select(!!!rows_syms) %>% 
+                map2_dfr(.x = ., .y = names(.), 
+                        .f = ~ get_dummy_flags(current_var_values = .x, current_var_name = .y, type = "rows"))
+        attr(x = output_table, which = "tabler_rows") <- tabler_rows
+        
+        # add tabler_cols as attribute, listing cols and dummy flags
+        tabler_cols <- data %>% select(!!!cols_syms) %>% 
+                map2_dfr(.x = ., .y = names(.), 
+                        .f = ~ get_dummy_flags(current_var_values = .x, current_var_name = .y, type = "cols"))
+        attr(x = output_table, which = "tabler_cols") <- tabler_cols
         
         # add row_var_tbl as attribute
         attr(x = output_table, which = "tabler_row_var_tbl") <- row_var_tbl
@@ -1891,8 +2155,6 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
         }
         
         
-
-
         #################################################################################################
         #################################################################################################
         
