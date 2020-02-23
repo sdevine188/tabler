@@ -246,6 +246,19 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                 }  
         }
         
+        if("list" %in% (data %>% select(!!!syms(rows), !!!syms(cols)) %>% 
+                        map(.x = ., .f = ~ class(.x)) %>%
+                        enframe() %>% unnest(value) %>% pull(value))) {
+                list_vars <- data %>% select(!!!syms(rows), !!!syms(cols)) %>% 
+                        map(.x = ., .f = ~ class(.x)) %>%
+                        enframe() %>% unnest(value) %>% filter(value == "list") %>% 
+                        pull(name)
+                stop(str_c("The following variables passed to the rows and/or cols argument ",
+                           "are lists, which cannot be used in tabler(): ",
+                           str_c(list_vars, collapse = ", ")))
+        }
+                
+        
         if(!is.null(stat_vars)) {
                 if((tibble(stat_vars_arg = stat_vars) %>% 
                     mutate(stat_vars_in_data = stat_vars_arg %in% names(data)) %>% 
@@ -254,7 +267,7 @@ tabler <- function(data = NULL, rows = NULL, cols = NULL, stats = NULL, stat_var
                                 mutate(stat_vars_in_data = stat_vars_arg %in% names(data)) %>% 
                                 filter(stat_vars_in_data == FALSE) %>% pull(stat_vars_arg) %>%
                                 str_c(string = ., collapse = ", ")
-                        stop(str_c("The following variables passed to the stat_ars argument ", 
+                        stop(str_c("The following variables passed to the stat_vars argument ", 
                                    "are not found in the data: ", stat_vars_not_in_data))
                 }  
         }
